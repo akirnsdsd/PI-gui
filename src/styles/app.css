@@ -481,6 +481,9 @@ samp {
 .content-tab-context-menu *,
 .content-tabs-trailing,
 .content-tabs-terminal-btn,
+.content-tabs-always-on-top-btn,
+.content-task-header,
+.content-task-title-input,
 .content-tabs-add-btn {
 	-webkit-app-region: no-drag;
 }
@@ -1049,12 +1052,17 @@ body.file-split-resizing {
 	padding: 0 14px;
 	overflow: hidden;
 	color: var(--text);
-	pointer-events: none;
+	pointer-events: auto;
+	cursor: default;
 }
 
 .content-tabs-root.task-only .content-task-header {
 	flex: 1;
 	max-width: none;
+}
+
+.content-task-header.is-editing {
+	gap: 7px;
 }
 
 .content-task-icon {
@@ -1087,6 +1095,27 @@ body.file-split-resizing {
 	letter-spacing: -0.006em;
 }
 
+.content-task-title-input {
+	width: min(100%, 360px);
+	min-width: 0;
+	height: 30px;
+	padding: 0 8px;
+	border: 1px solid color-mix(in srgb, var(--text) 24%, var(--border));
+	border-radius: 7px;
+	outline: none;
+	background: color-mix(in srgb, var(--bg-elev) 94%, var(--bg));
+	color: var(--text);
+	font: inherit;
+	font-size: var(--font-size-body);
+	font-weight: 580;
+	letter-spacing: -0.006em;
+}
+
+.content-task-title-input:focus {
+	border-color: color-mix(in srgb, var(--text) 38%, var(--border));
+	box-shadow: 0 0 0 2px color-mix(in srgb, var(--text) 9%, transparent);
+}
+
 .content-tabs-root:not(.task-only) .content-tabs-scroll {
 	border-left: 1px solid color-mix(in srgb, var(--border) 62%, transparent);
 }
@@ -1113,20 +1142,26 @@ body.file-split-resizing {
 }
 
 .content-tabs-trailing {
-	width: 44px;
-	min-width: 44px;
+	width: auto;
+	min-width: 76px;
 	height: 100%;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
+	gap: 2px;
+	padding: 0 6px;
 	background: var(--bg);
 	flex-shrink: 0;
 	position: relative;
 }
 
+.content-tabs-trailing.task-only {
+	min-width: 44px;
+}
 
 .content-tabs-add-btn,
-.content-tabs-terminal-btn {
+.content-tabs-terminal-btn,
+.content-tabs-always-on-top-btn {
 	width: 28px;
 	height: 28px;
 	border: none;
@@ -1154,7 +1189,8 @@ body.file-split-resizing {
 	margin: 0 3px;
 }
 
-.content-tabs-terminal-btn svg {
+.content-tabs-terminal-btn svg,
+.content-tabs-always-on-top-btn svg {
 	width: 15px;
 	height: 15px;
 	fill: none;
@@ -1165,13 +1201,31 @@ body.file-split-resizing {
 }
 
 .content-tabs-add-btn:hover,
-.content-tabs-terminal-btn:hover {
+.content-tabs-terminal-btn:hover,
+.content-tabs-always-on-top-btn:hover {
 	background: color-mix(in srgb, var(--bg-soft) 76%, var(--bg));
 	color: var(--text);
 }
 
-.content-tabs-terminal-btn.active {
+.content-tabs-terminal-btn.active,
+.content-tabs-always-on-top-btn.active {
 	color: var(--text);
+}
+
+.content-tabs-always-on-top-btn.active {
+	background: color-mix(in srgb, var(--text) 12%, var(--bg));
+}
+
+.content-tabs-always-on-top-btn:disabled {
+	opacity: 0.5;
+	cursor: progress;
+}
+
+.content-tabs-always-on-top-btn:focus-visible,
+.content-tabs-terminal-btn:focus-visible,
+.content-tabs-add-btn:focus-visible {
+	outline: 2px solid color-mix(in srgb, var(--text) 34%, transparent);
+	outline-offset: 1px;
 }
 
 .content-tab {
@@ -3261,15 +3315,14 @@ body.file-split-resizing #file-split-resize-handle::after {
 	display: grid;
 	grid-template-columns: 1fr auto;
 	gap: 8px;
-	align-items: start;
+	align-items: center;
 	padding: 12px 8px 10px;
 }
 
 .sidebar-mode-meta {
-	display: grid;
-	gap: 6px;
+	display: flex;
+	align-items: center;
 	min-width: 0;
-	justify-items: start;
 }
 
 .sidebar-mode-switch {
@@ -3281,7 +3334,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 	width: fit-content;
 	max-width: 100%;
 	justify-self: start;
-	align-self: start;
+	align-self: center;
 	padding: 3px;
 	border-radius: 999px;
 	border: none;
@@ -3436,6 +3489,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
+	align-self: center;
 }
 
 .sidebar-mode-create-btn,
@@ -4955,6 +5009,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 .user-row {
 	display: flex;
 	justify-content: flex-end;
+	margin-bottom: 8px;
 }
 
 .message-shell {
@@ -6299,7 +6354,8 @@ markdown-block.markdown-content {
 	left: 0;
 	right: 0;
 	bottom: 0;
-	padding: 0 16px 20px;
+	z-index: 50;
+	padding: 0 16px 8px;
 	background: linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--bg) 76%, transparent) 36%, var(--bg) 100%);
 	pointer-events: none;
 }
@@ -6331,6 +6387,7 @@ markdown-block.markdown-content {
 	display: flex;
 	align-items: flex-start;
 	gap: 8px;
+	flex-wrap: wrap;
 }
 
 .chat-input {
@@ -6360,7 +6417,7 @@ markdown-block.markdown-content {
 .composer-controls {
 	display: flex;
 	justify-content: space-between;
-	align-items: center;
+	align-items: flex-end;
 	gap: 8px;
 	padding: 4px 0 0;
 	margin-top: 0;
@@ -6368,7 +6425,7 @@ markdown-block.markdown-content {
 
 .control-group {
 	display: flex;
-	align-items: center;
+	align-items: flex-end;
 	gap: 6px;
 	min-width: 0;
 }
@@ -6507,6 +6564,8 @@ markdown-block.markdown-content {
 	/* 允许在窄窗口下收缩，触发器内的文字以 ellipsis 截断而不是换行溢出 */
 	min-width: 0;
 	flex: 0 1 auto;
+	--model-picker-submenu-width: 204px;
+	--model-picker-submenu-gap: 3px;
 }
 
 .model-picker-trigger {
@@ -6565,22 +6624,20 @@ markdown-block.markdown-content {
 }
 
 .model-picker-popover {
-	/* 触发器位于控制区右侧，弹层右对齐锚定、向左展开，避免溢出窗口右缘 */
+	/* 渠道菜单保持紧凑；hover/focus 某个渠道后，模型作为独立子菜单向左展开。 */
 	right: 0;
 	display: grid;
-	grid-template-columns: minmax(132px, 176px) minmax(188px, 270px);
-	/* 底部「管理渠道…」一行：内容区占满剩余高度，footer 自适应 */
-	grid-template-rows: 1fr auto;
-	min-width: 340px;
-	max-width: min(92vw, 470px);
+	grid-template-rows: minmax(0, 1fr) auto;
+	box-sizing: border-box;
+	width: min(204px, calc(100vw - 16px));
+	min-width: 0;
+	max-width: calc(100vw - 16px);
 	height: 244px;
-	/* 双栏网格布局：卡片 padding 归零，间距由两栏与 footer 自行承担，滚动也在栏内 */
 	padding: 0;
-	overflow: hidden;
+	overflow: visible;
 }
 
 .model-picker-footer {
-	grid-column: 1 / -1;
 	display: flex;
 	padding: 4px;
 	border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -6605,11 +6662,6 @@ markdown-block.markdown-content {
 	color: var(--text);
 }
 
-/* 空态（无已配置渠道）时提示文字占满内容区 */
-.model-picker-popover > .model-picker-empty:first-child {
-	grid-column: 1 / -1;
-}
-
 .model-picker-providers {
 	display: grid;
 	gap: 4px;
@@ -6617,9 +6669,9 @@ markdown-block.markdown-content {
 	grid-auto-rows: min-content;
 	align-content: start;
 	height: 100%;
+	min-height: 0;
 	overflow-x: hidden;
 	overflow-y: auto;
-	border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 	background: color-mix(in srgb, var(--bg-soft) 42%, transparent);
 }
 
@@ -6639,11 +6691,18 @@ markdown-block.markdown-content {
 	align-items: center;
 	justify-content: space-between;
 	gap: 6px;
-	/* 右侧留出悬浮登录/退出按钮的位置，避免遮挡渠道名（按钮宽约 56px + 3px 偏移） */
-	padding: 0 60px 0 8px;
+	padding: 0 28px 0 8px;
 	font-size: 12px;
 	cursor: pointer;
 	min-width: 0;
+}
+
+.model-picker-provider-caret {
+	position: absolute;
+	right: 9px;
+	font-size: 17px;
+	line-height: 1;
+	color: var(--muted-2);
 }
 
 /* 未配置渠道：名称 + 小字说明两行布局 */
@@ -6733,6 +6792,22 @@ markdown-block.markdown-content {
 	overflow-y: auto;
 }
 
+.model-picker-model-submenu {
+	position: absolute;
+	right: calc(100% + var(--model-picker-submenu-gap));
+	top: 0;
+	box-sizing: border-box;
+	width: min(var(--model-picker-submenu-width), calc(100vw - 16px));
+	height: auto;
+	min-height: 40px;
+	max-height: 244px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--bg-elev);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+	z-index: 2;
+}
+
 .model-picker-auth-hint {
 	margin: 2px 4px 4px;
 	padding: 6px 8px;
@@ -6753,18 +6828,30 @@ markdown-block.markdown-content {
 	padding: 0 8px;
 	font-size: 12px;
 	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
 
 /* WebKit 下 button 自身的 text-overflow 对匿名内容盒不生效，ellipsis 要落在内部块级 span 上 */
-.model-picker-model > span {
+.model-picker-model-label {
 	display: block;
+	flex: 1;
+	min-width: 0;
 	max-width: 100%;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+
+.model-picker-model-check {
+	flex: 0 0 auto;
+	color: var(--text);
+	font-size: 13px;
 }
 
 .model-picker-model:hover,
@@ -6894,8 +6981,8 @@ markdown-block.markdown-content {
 }
 
 .send-btn {
-	width: 28px;
-	height: 28px;
+	width: var(--size-composer-primary-action);
+	height: var(--size-composer-primary-action);
 	padding: 0;
 	border-radius: 999px;
 	display: grid;
@@ -6908,8 +6995,8 @@ markdown-block.markdown-content {
 }
 
 .send-btn svg {
-	width: 14px;
-	height: 14px;
+	width: 17px;
+	height: 17px;
 	fill: none;
 	stroke: currentColor;
 	stroke-width: 1.7;
@@ -6918,9 +7005,9 @@ markdown-block.markdown-content {
 }
 
 .primary-send .send-arrow-icon {
-	width: 14px;
-	height: 14px;
-	stroke-width: 1.65;
+	width: 17px;
+	height: 17px;
+	stroke-width: 1.8;
 }
 
 .primary-send {
@@ -6971,8 +7058,8 @@ markdown-block.markdown-content {
 }
 
 .stop-btn .stop-square-icon {
-	width: 12px;
-	height: 12px;
+	width: 16px;
+	height: 16px;
 	stroke-width: 0;
 	fill: currentColor;
 }
@@ -7264,15 +7351,48 @@ markdown-block.markdown-content {
 	display: flex;
 	align-items: center;
 	gap: 6px;
-	flex-wrap: wrap;
+	flex-wrap: nowrap;
 	min-width: 0;
 }
 
-.composer-attachments.inline {
-	margin-top: 5px;
-	max-width: min(28%, 220px);
+.composer-attachment-tray {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	max-width: 100%;
 	overflow-x: auto;
-	padding: 0 0 2px;
+	overflow-y: hidden;
+	flex: 0 0 100%;
+	scrollbar-width: thin;
+	scrollbar-color: color-mix(in srgb, var(--text) 18%, transparent) transparent;
+}
+
+.composer-attachment-strip {
+	flex: 0 0 auto;
+}
+
+.composer-attachment-tray > .composer-attachment-strip {
+	display: contents;
+}
+
+.composer-row > .composer-attachment-strip {
+	order: -1;
+	width: 100%;
+	max-width: 100%;
+	overflow-x: auto;
+	flex-basis: 100%;
+}
+
+.composer-attachments.composer-attachment-strip {
+	margin: 0 0 8px;
+	padding: 0 0 3px;
+}
+
+.composer-attachment-tray > .composer-attachments.composer-attachment-strip,
+.composer-attachment-tray > .composer-image-cards.composer-attachment-strip {
+	margin-bottom: 0;
+	padding-bottom: 0;
 }
 
 .composer-attachment {
@@ -7342,8 +7462,9 @@ markdown-block.markdown-content {
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	flex-wrap: wrap;
+	flex-wrap: nowrap;
 	margin: 0 0 8px;
+	padding: 0 0 3px;
 }
 
 .composer-image-card {
@@ -7772,19 +7893,6 @@ markdown-block.markdown-content {
 }
 
 @media (max-width: 980px) {
-	.composer-controls {
-		flex-wrap: wrap;
-	}
-
-	.control-group {
-		flex-wrap: wrap;
-	}
-
-	.control-group.right {
-		width: 100%;
-		justify-content: flex-end;
-	}
-
 	.model-picker-trigger {
 		max-width: 220px;
 	}
@@ -7818,11 +7926,149 @@ markdown-block.markdown-content {
 	}
 
 	.composer-shell {
-		padding: 0 16px 12px;
+		padding: 0 16px 6px;
 	}
 
 	.model-picker-trigger {
 		max-width: min(58vw, 260px);
+	}
+}
+
+/* Compact windows: the sidebar becomes an overlaid hover/focus drawer and never
+   participates in the main content flex sizing. The existing toggle remains the
+   click target; moving into the opened drawer keeps it visible. */
+@media (max-width: 760px) {
+	.content-shell {
+		position: relative;
+	}
+
+	#sidebar-container {
+		position: absolute;
+		inset: 0 auto 0 0;
+		z-index: 1100;
+		width: min(var(--sidebar-width, 320px), calc(100vw - 48px));
+		min-width: min(var(--sidebar-width, 320px), calc(100vw - 48px));
+		max-width: min(var(--sidebar-width, 320px), calc(100vw - 48px));
+		height: 100%;
+		border-radius: 0 0 14px 0;
+		box-shadow: 14px 0 32px rgba(0, 0, 0, 0.22);
+		transform: translateX(calc(-100% - 16px));
+		opacity: 0;
+		pointer-events: none;
+		transition: transform 180ms var(--ease-enter), opacity 140ms ease;
+	}
+
+	#sidebar-container.collapsed {
+		width: min(var(--sidebar-width, 320px), calc(100vw - 48px));
+		min-width: min(var(--sidebar-width, 320px), calc(100vw - 48px));
+		max-width: min(var(--sidebar-width, 320px), calc(100vw - 48px));
+		overflow-x: visible;
+		overflow-y: hidden;
+	}
+
+	.content-shell:has(#sidebar-collapse-toggle:hover) #sidebar-container,
+	.content-shell:has(#sidebar-collapse-toggle:focus-visible) #sidebar-container,
+	.content-shell.compact-sidebar-open #sidebar-container,
+	#sidebar-container:hover,
+	#sidebar-container:focus-within {
+		transform: translateX(0);
+		opacity: 1;
+		pointer-events: auto;
+	}
+
+	#sidebar-resize-handle {
+		width: 0;
+		min-width: 0;
+		pointer-events: none;
+	}
+
+	#sidebar-collapse-toggle,
+	#sidebar-collapse-toggle.hidden {
+		display: grid;
+		z-index: 1101;
+	}
+
+	#content-tabs-container,
+	#content-tabs-container.tabs-collapsed,
+	#sidebar-collapse-toggle:not(.hidden) + #content-tabs-container,
+	#sidebar-collapse-toggle:not(.hidden) + #content-tabs-container.tabs-collapsed {
+		padding-left: 44px;
+	}
+
+	.content-task-header {
+		min-width: 0;
+		padding: 0 8px;
+	}
+
+	.content-tabs-root:not(.task-only) .content-task-header {
+		flex-basis: 42%;
+	}
+
+	.content-tabs-trailing {
+		min-width: 68px;
+		padding-inline: 3px;
+	}
+
+	.content-tabs-trailing.task-only {
+		min-width: 38px;
+	}
+
+	.composer-shell {
+		padding-inline: 10px;
+	}
+
+	.composer-panel {
+		padding-inline: 10px;
+	}
+
+	.composer-controls {
+		gap: 5px;
+	}
+
+	.control-group.right {
+		gap: 4px;
+	}
+
+	.model-picker-trigger {
+		max-width: min(44vw, 220px);
+	}
+}
+
+@media (max-width: 520px) {
+	.content-tabs-root:not(.task-only) .content-task-header {
+		flex-basis: 34%;
+	}
+
+	.content-task-icon {
+		display: none;
+	}
+
+	.content-tab {
+		width: 98px;
+		min-width: 98px;
+		max-width: 98px;
+	}
+
+	.model-picker-trigger-label {
+		max-width: 118px;
+	}
+
+	.model-picker-popover {
+		width: min(168px, calc(100vw - 16px));
+	}
+
+	.model-picker-root {
+		--model-picker-submenu-width: 176px;
+		--model-picker-submenu-gap: 2px;
+	}
+
+	.thinking-select-trigger {
+		padding-inline: 8px;
+	}
+
+	.send-btn {
+		width: var(--size-composer-primary-action);
+		height: var(--size-composer-primary-action);
 	}
 }
 
@@ -7834,7 +8080,7 @@ markdown-block.markdown-content {
  * z-index 层级表（全 app 统一，新增浮层按此归位）：
  *   0-2     内容层：tab 分隔线、resize 把手等局部装饰
  *   5-8     chrome 层：tab 拖拽幽灵、滚动按钮
- *   12-40   局部弹层（absolute，限父容器内）：侧栏/composer 下拉、review 抽屉(24)
+ *   12-50   局部弹层（absolute，限父容器内）：侧栏/composer 下拉、review 抽屉(24)
  *   1100    全局 popover（fixed）：settings-select-popover
  *   1200    全局右键菜单：sidebar-context-menu(+backdrop 1199)
  *   1250    设置子对话框：settings-subdialog-backdrop

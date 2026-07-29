@@ -7,6 +7,7 @@ import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { html, nothing, render, type TemplateResult } from "lit";
 import { t } from "../i18n/index.js";
 import { promptDialog } from "./app-dialog.js";
+import { resolveSessionRefreshScrollAction, resolveViewportPopoverLeft } from "./desktop-ui-behavior.js";
 import { openImageLightbox } from "./image-lightbox.js";
 import {
 	type PiAuthProviderStatus,
@@ -195,6 +196,8 @@ interface UiMessage {
 	role: UiRole;
 	text: string;
 	toolCalls: ToolCallBlock[];
+	startedAt?: number;
+	endedAt?: number;
 	attachments?: PendingImage[];
 	thinking?: string;
 	thinkingExpanded?: boolean;
@@ -431,7 +434,7 @@ function uiIcon(name: "edit" | "retry" | "copy" | "attach" | "send" | "stop" | "
 		case "send":
 			return html`<svg class="send-arrow-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.7V3.6"></path><path d="M4.6 7L8 3.6 11.4 7"></path></svg>`;
 		case "stop":
-			return html`<svg class="stop-square-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.9" y="4.9" width="6.2" height="6.2" rx="1.2"></rect></svg>`;
+			return html`<svg class="stop-square-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.35" y="3.35" width="9.3" height="9.3" rx="1.65"></rect></svg>`;
 		case "spinner":
 			return html`<svg class="spinner-icon" viewBox="0 0 16 16" aria-hidden="true"><circle class="spinner-track" cx="8" cy="8" r="5.4"></circle><path class="spinner-arc" d="M8 2.6a5.4 5.4 0 0 1 5.4 5.4"></path></svg>`;
 		case "spark":
@@ -518,6 +521,7 @@ export class ChatView {
 	private settingThinking = false;
 	private unsupportedThinkingLevelsByModel = new Map<string, Set<ThinkingLevel>>();
 	private modelPickerOpen = false;
+	private modelPickerSubmenuOpen = false;
 	private addMenuOpen = false;
 	private thinkingMenuOpen = false;
 	private modelPickerActiveProvider = "";
@@ -593,6 +597,7 @@ export class ChatView {
 	private composerHistoryDraft = "";
 	private runHasAssistantText = false;
 	private runSawToolActivity = false;
+	private runStartedAt = 0;
 	private keepWorkflowExpandedUntilAssistantText = false;
 	private readonly workingStatusPhrases = [
 		t("chatView.working.phrases.starting"),
@@ -615,6 +620,7 @@ export class ChatView {
 	private workingStatusPhase: "typing" | "hold" = "typing";
 	private workingStatusCharCount = 0;
 	private workingStatusTimer: ReturnType<typeof setTimeout> | null = null;
+	private workflowElapsedTimer: ReturnType<typeof setInterval> | null = null;
 	private disconnectNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 	private streamingReconcileTimer: ReturnType<typeof setTimeout> | null = null;
 	private composerResizeObserver: ResizeObserver | null = null;
@@ -658,6 +664,12 @@ export class ChatView {
 	/** 会话切换「文件先行」预览的竞态守卫：seq 单调递增，过期预览直接丢弃。 */
 	private sessionPreviewSeq = 0;
 	private sessionPreviewPath: string | null = null;
+	/** 会话切换后的强制落底代次；只允许当前切换链路安排滚动。 */
+	private sessionScrollGeneration = 0;
+	private pendingSessionScrollGeneration: number | null = null;
+	private previewSettledSessionScrollGeneration: number | null = null;
+	private sessionScrollFrame: number | null = null;
+	private sessionScrollSettleFrame: number | null = null;
 	private gitKnownBranchesByProject = new Map<string, string[]>();
 	private welcomeDashboard: WelcomeDashboardSummary = {
 		loading: false,
@@ -764,6 +776,7 @@ export class ChatView {
 
 	private resetSessionUiTransientState(): void {
 		this.modelPickerOpen = false;
+		this.modelPickerSubmenuOpen = false;
 		this.addMenuOpen = false;
 		this.thinkingMenuOpen = false;
 		this.selectedSkillDraft = null;
@@ -787,6 +800,7 @@ export class ChatView {
 	private resetRunActivityState(): void {
 		this.runHasAssistantText = false;
 		this.runSawToolActivity = false;
+		this.runStartedAt = 0;
 		this.clearWorkingStatusTimer(true);
 	}
 
@@ -851,6 +865,11 @@ export class ChatView {
 		this.historyOldestEntryId = null;
 		this.historyLoadingMore = false;
 		this.historyPagingGeneration += 1;
+		this.autoFollowChat = true;
+		this.sessionScrollGeneration += 1;
+		this.pendingSessionScrollGeneration = this.sessionScrollGeneration;
+		this.previewSettledSessionScrollGeneration = null;
+		this.cancelScheduledSessionScroll();
 		// 切会话同时作废仍在途的权威刷新：旧会话的 refresh 响应不得再提交到新会话视图。
 		this.refreshGeneration += 1;
 		this.resetSessionUiTransientState();
@@ -893,7 +912,12 @@ export class ChatView {
 			}).__PI_DESKTOP_PUSH_TRACE__;
 			push?.(`chat:session-preview ok entries=${page.entries.length} tookMs=${Date.now() - startedAt}`);
 			this.render();
-			this.scrollToBottom();
+			const scrollGeneration = this.pendingSessionScrollGeneration;
+			if (scrollGeneration !== null) {
+				this.pendingSessionScrollGeneration = null;
+				this.previewSettledSessionScrollGeneration = scrollGeneration;
+				this.scheduleSessionScrollToLatest(scrollGeneration);
+			}
 		} catch (err) {
 			// 预览失败静默降级：保留骨架屏，等权威链路刷新。
 			console.warn("session preview failed:", err);
@@ -1467,14 +1491,19 @@ export class ChatView {
 
 	private setModelPickerActiveProvider(provider: string): void {
 		const normalized = normalizeText(provider);
-		if (!normalized || this.modelPickerActiveProvider === normalized) return;
+		if (!normalized) return;
+		const changed = this.modelPickerActiveProvider !== normalized || !this.modelPickerSubmenuOpen;
 		this.modelPickerActiveProvider = normalized;
+		this.modelPickerSubmenuOpen = true;
+		if (!changed) return;
 		this.render();
+		this.clampModelPickerPopover();
 	}
 
 	private closeModelPicker(options: { focusComposer?: boolean } = {}): void {
 		if (!this.modelPickerOpen) return;
 		this.modelPickerOpen = false;
+		this.modelPickerSubmenuOpen = false;
 		this.render();
 		if (options.focusComposer) {
 			requestAnimationFrame(() => this.focusInput());
@@ -1495,6 +1524,7 @@ export class ChatView {
 			}
 		}
 		this.modelPickerOpen = true;
+		this.modelPickerSubmenuOpen = false;
 		this.addMenuOpen = false;
 		this.thinkingMenuOpen = false;
 		this.render();
@@ -1527,6 +1557,36 @@ export class ChatView {
 
 	private clampModelPickerPopover(): void {
 		this.clampUpwardPopover(".model-picker-root", ".model-picker-popover", 244);
+		requestAnimationFrame(() => {
+			const root = this.container.querySelector<HTMLElement>(".model-picker-root");
+			const popover = this.container.querySelector<HTMLElement>(".model-picker-popover");
+			if (!root || !popover) return;
+			const rootRect = root.getBoundingClientRect();
+			const popoverRect = popover.getBoundingClientRect();
+			if (rootRect.width === 0 || popoverRect.width === 0) return;
+			const chatRoot = root.closest<HTMLElement>(".chat-root") ?? this.container.querySelector<HTMLElement>(".chat-root");
+			const chatRect = chatRoot?.getBoundingClientRect();
+			const rootStyle = getComputedStyle(root);
+			const configuredSubmenuWidth = Number.parseFloat(rootStyle.getPropertyValue("--model-picker-submenu-width")) || 204;
+			const submenuGap = Number.parseFloat(rootStyle.getPropertyValue("--model-picker-submenu-gap")) || 3;
+			const viewportLeft = resolveViewportPopoverLeft(
+				rootRect.right,
+				popoverRect.width,
+				window.innerWidth,
+			);
+			const submenu = popover.querySelector<HTMLElement>(".model-picker-model-submenu");
+			const submenuWidth = submenu?.getBoundingClientRect().width || configuredSubmenuWidth;
+			const contentLeft = Math.max(8, (chatRect?.left ?? 0) + 8);
+			const contentRight = Math.min(window.innerWidth - 8, (chatRect?.right ?? window.innerWidth) - 8);
+			const minimumLeftForSubmenu = contentLeft + submenuWidth + submenuGap;
+			const maximumLeft = Math.max(contentLeft, contentRight - popoverRect.width);
+			const clampedLeft = Math.min(
+				Math.max(viewportLeft, minimumLeftForSubmenu),
+				maximumLeft,
+			);
+			popover.style.right = "auto";
+			popover.style.left = `${Math.round(clampedLeft - rootRect.left)}px`;
+		});
 	}
 
 	private toggleModelPicker(preferredProvider = ""): void {
@@ -1831,6 +1891,8 @@ export class ChatView {
 		this.runSawToolActivity = false;
 		this.keepWorkflowExpandedUntilAssistantText = false;
 		this.clearWorkingStatusTimer(true);
+		this.clearWorkflowElapsedTicker();
+		this.cancelScheduledSessionScroll();
 		for (const unlisten of this.nativeFileDropUnlisteners) {
 			unlisten();
 		}
@@ -1907,6 +1969,9 @@ export class ChatView {
 			this.forkEntryIdByMessageId.clear();
 			this.lastAssistantContextTokens = this.deriveLatestAssistantContextTokens(backendMessages);
 			if (state.isStreaming) {
+				if (this.runStartedAt <= 0) {
+					this.runStartedAt = Date.now();
+				}
 				let lastUserIndex = -1;
 				for (let i = backendMessages.length - 1; i >= 0; i -= 1) {
 					if ((backendMessages[i].role as string) === "user") {
@@ -1941,13 +2006,27 @@ export class ChatView {
 			} else {
 				this.runHasAssistantText = false;
 				this.runSawToolActivity = false;
+				this.runStartedAt = 0;
 				this.keepWorkflowExpandedUntilAssistantText = false;
 			}
 			this.pendingDeliveryMode = state.isStreaming ? "steer" : "prompt";
 			this.bindingStatusText = null;
 			this.bindingForFreshSession = false;
 			this.render();
-			this.scrollToBottom();
+			const sessionScrollGeneration = this.pendingSessionScrollGeneration;
+			const scrollAction = resolveSessionRefreshScrollAction(
+				sessionScrollGeneration,
+				this.previewSettledSessionScrollGeneration,
+				this.autoFollowChat,
+			);
+			if (scrollAction === "schedule-latest" && sessionScrollGeneration !== null) {
+				this.pendingSessionScrollGeneration = null;
+				this.previewSettledSessionScrollGeneration = null;
+				this.scheduleSessionScrollToLatest(sessionScrollGeneration);
+			} else if (scrollAction === "follow-stream") {
+				this.scrollToBottom();
+			}
+			this.previewSettledSessionScrollGeneration = null;
 			// runtime 就绪：把连接窗口里本地排队的消息自动发出去。
 			void this.flushOfflineComposerQueue();
 			void this.refreshSessionStats(true);
@@ -3218,7 +3297,7 @@ export class ChatView {
 		}
 		if (next.length === 0) return;
 		this.pendingFileReferences = [...this.pendingFileReferences, ...next];
-		this.render();
+		this.renderComposerAttachmentChange();
 	}
 
 	private dedupeDroppedPaths(paths: string[]): string[] {
@@ -3328,7 +3407,7 @@ export class ChatView {
 					return;
 				}
 				this.pendingImages = [...this.pendingImages, ...next];
-				this.render();
+				this.renderComposerAttachmentChange();
 			} finally {
 				this.releasePendingImageReservation(accepted.length, reservedBytes);
 			}
@@ -3607,7 +3686,7 @@ export class ChatView {
 			}
 
 			this.pendingImages = [...this.pendingImages, ...next];
-			this.render();
+			this.renderComposerAttachmentChange();
 			if (failed > 0) {
 				this.pushNotice(t("chatView.notice.attachPartial", { count: next.length, failed }), "info");
 			}
@@ -3632,7 +3711,7 @@ export class ChatView {
 
 	private removePendingImage(id: string): void {
 		this.pendingImages = this.pendingImages.filter((img) => img.id !== id);
-		this.render();
+		this.renderComposerAttachmentChange();
 	}
 
 	/** 点开图片大图查看器（composer 待发图片与时间线已发图片共用）。 */
@@ -3648,7 +3727,23 @@ export class ChatView {
 
 	private removePendingFileReference(id: string): void {
 		this.pendingFileReferences = this.pendingFileReferences.filter((entry) => entry.id !== id);
+		this.renderComposerAttachmentChange();
+	}
+
+	private renderComposerAttachmentChange(): void {
+		const currentInput = this.container.querySelector<HTMLTextAreaElement>("#chat-input");
+		const selectionStart = currentInput?.selectionStart ?? this.inputText.length;
+		const selectionEnd = currentInput?.selectionEnd ?? selectionStart;
 		this.render();
+		requestAnimationFrame(() => {
+			const nextInput = this.container.querySelector<HTMLTextAreaElement>("#chat-input");
+			if (!nextInput || nextInput.disabled) return;
+			nextInput.focus({ preventScroll: true });
+			nextInput.setSelectionRange(
+				Math.min(selectionStart, nextInput.value.length),
+				Math.min(selectionEnd, nextInput.value.length),
+			);
+		});
 	}
 
 	private composedPromptText(rawText: string): string {
@@ -3704,13 +3799,14 @@ export class ChatView {
 			}
 			return last;
 		}
-		const next: UiMessage = {
-			id: uid("assistant"),
-			role: "assistant",
-			text: seed?.text ?? "",
-			errorText: seed?.errorText,
-			toolCalls: [],
-			isStreaming: true,
+			const next: UiMessage = {
+				id: uid("assistant"),
+				role: "assistant",
+				text: seed?.text ?? "",
+				errorText: seed?.errorText,
+				toolCalls: [],
+				startedAt: Date.now(),
+				isStreaming: true,
 			isThinkingStreaming: false,
 			thinkingExpanded: this.allThinkingExpanded,
 		};
@@ -3743,6 +3839,9 @@ export class ChatView {
 			deliveryMode: mode,
 		});
 		this.autoFollowChat = true;
+		if (this.runStartedAt <= 0) {
+			this.runStartedAt = Date.now();
+		}
 		this.runHasAssistantText = false;
 		this.runSawToolActivity = false;
 		this.keepWorkflowExpandedUntilAssistantText = false;
@@ -4166,6 +4265,9 @@ export class ChatView {
 			if (message.role !== "assistant") continue;
 			message.isStreaming = false;
 			message.isThinkingStreaming = false;
+			if (message.startedAt && !message.endedAt) {
+				message.endedAt = Date.now();
+			}
 			for (const toolCall of message.toolCalls) {
 				toolCall.isRunning = false;
 				toolCall.streamingOutput = undefined;
@@ -4181,6 +4283,7 @@ export class ChatView {
 		this.pendingDeliveryMode = "prompt";
 		this.runHasAssistantText = false;
 		this.runSawToolActivity = false;
+		this.runStartedAt = 0;
 		this.keepWorkflowExpandedUntilAssistantText = false;
 		this.collapsedAutoWorkflowIds.clear();
 		this.onRunStateChange?.(false);
@@ -4714,6 +4817,37 @@ export class ChatView {
 		`;
 	}
 
+	private cancelScheduledSessionScroll(): void {
+		if (this.sessionScrollFrame !== null) {
+			cancelAnimationFrame(this.sessionScrollFrame);
+			this.sessionScrollFrame = null;
+		}
+		if (this.sessionScrollSettleFrame !== null) {
+			cancelAnimationFrame(this.sessionScrollSettleFrame);
+			this.sessionScrollSettleFrame = null;
+		}
+	}
+
+	/**
+	 * 会话切换落底使用双 RAF：第一次等待历史 DOM 提交，第二次吸收 markdown /
+	 * composer 尺寸在下一帧产生的布局变化。全程只改 scrollTop，不转移焦点。
+	 */
+	private scheduleSessionScrollToLatest(generation: number): void {
+		if (generation !== this.sessionScrollGeneration) return;
+		this.cancelScheduledSessionScroll();
+		this.autoFollowChat = true;
+		this.sessionScrollFrame = requestAnimationFrame(() => {
+			this.sessionScrollFrame = null;
+			if (generation !== this.sessionScrollGeneration || !this.scrollContainer) return;
+			this.scrollContainer.scrollTop = this.scrollContainer.scrollHeight;
+			this.sessionScrollSettleFrame = requestAnimationFrame(() => {
+				this.sessionScrollSettleFrame = null;
+				if (generation !== this.sessionScrollGeneration || !this.scrollContainer) return;
+				this.scrollContainer.scrollTop = this.scrollContainer.scrollHeight;
+			});
+		});
+	}
+
 	private scrollToBottom(force = false): void {
 		const shouldFollow = force || this.autoFollowChat;
 		if (!shouldFollow) return;
@@ -4793,6 +4927,40 @@ export class ChatView {
 		this.workingStatusPhraseIndex = 0;
 		this.workingStatusPhase = "typing";
 		this.workingStatusCharCount = 0;
+	}
+
+	private hasRunningWorkflowElapsedTime(): boolean {
+		if (this.compactionCycle?.status === "running") return true;
+		const hasActiveWorkflow = this.messages.some(
+			(message) =>
+				message.role === "assistant" &&
+				(Boolean((message.thinking ?? "").trim()) ||
+					message.toolCalls.some((toolCall) => Boolean(toolCall.startedAt))),
+		);
+		return hasActiveWorkflow && this.currentIsStreaming();
+	}
+
+	private clearWorkflowElapsedTicker(): void {
+		if (this.workflowElapsedTimer) {
+			clearInterval(this.workflowElapsedTimer);
+		}
+		this.workflowElapsedTimer = null;
+	}
+
+	/** 全时间线共用一个秒级 ticker；结束或离开会话后立即释放。 */
+	private syncWorkflowElapsedTicker(): void {
+		if (!this.hasRunningWorkflowElapsedTime()) {
+			this.clearWorkflowElapsedTicker();
+			return;
+		}
+		if (this.workflowElapsedTimer) return;
+		this.workflowElapsedTimer = setInterval(() => {
+			if (!this.hasRunningWorkflowElapsedTime()) {
+				this.clearWorkflowElapsedTicker();
+				return;
+			}
+			this.render();
+		}, 1000);
 	}
 
 	private scheduleWorkingStatusTick(delayMs: number): void {
@@ -5073,8 +5241,8 @@ export class ChatView {
 			messages: this.messages,
 			startIndex,
 			currentIsStreaming: this.currentIsStreaming(),
-			keepWorkflowExpandedUntilAssistantText: this.keepWorkflowExpandedUntilAssistantText,
 			runHasAssistantText: this.runHasAssistantText,
+			fallbackStartedAt: this.runStartedAt,
 			truncateText: truncate,
 		});
 	}
@@ -5371,6 +5539,7 @@ export class ChatView {
 			currentModelDisplay,
 			currentProviderDisplay,
 			modelPickerOpen: this.modelPickerOpen,
+			modelPickerSubmenuOpen: this.modelPickerSubmenuOpen,
 			loadingModels: this.loadingModels,
 			loadingModelCatalog: this.loadingModelCatalog,
 			providerGroups,
@@ -5557,10 +5726,16 @@ export class ChatView {
 
 		return html`
 			<div class="composer-panel">
-				${renderPendingImagesView(this.pendingImages, (id) => this.removePendingImage(id), (id) => this.previewImages(this.pendingImages, id))}
+				${this.pendingImages.length > 0 || this.pendingFileReferences.length > 0
+					? html`
+						<div class="composer-attachment-tray">
+							${renderPendingImagesView(this.pendingImages, (id) => this.removePendingImage(id), (id) => this.previewImages(this.pendingImages, id))}
+							${renderPendingFileReferencesView(this.pendingFileReferences, truncate, (id) => this.removePendingFileReference(id))}
+						</div>
+					`
+					: nothing}
 				<div class="composer-row">
 					${renderComposerSkillDraftPillView(this.selectedSkillDraft, skillGlyphIcon(), () => this.removeComposerSkillDraft())}
-					${renderPendingFileReferencesView(this.pendingFileReferences, truncate, (id) => this.removePendingFileReference(id))}
 					<textarea
 						id="chat-input"
 						class="chat-input"
@@ -5799,9 +5974,7 @@ export class ChatView {
 
 	render(): void {
 		this.doRender();
-		if (this.projectPath) {
-			this.scrollToBottom();
-		}
+		this.syncWorkflowElapsedTicker();
 		this.syncWorkingStatusAnimation();
 		this.ensureActiveSlashItemVisible();
 	}

@@ -8,6 +8,10 @@ import { ChatView, type SessionForkedInfo } from "./components/chat-view.js";
 import { resolveProjectFileReference } from "./components/chat-view/local-file-reference.js";
 import { CommandPalette } from "./components/command-palette.js";
 import { ContentTabs } from "./components/content-tabs.js";
+import {
+	shouldRollbackSessionTitle,
+	toggleCompactSidebarOverlay,
+} from "./components/desktop-ui-behavior.js";
 import { ExtensionUiHandler, normalizeExtensionUiRequest, type McpChipServerInfo, type NotificationActionTarget } from "./components/extension-ui-handler.js";
 import { type DraftFileCreatedEvent, FileViewer } from "./components/file-viewer.js";
 import { PackagesView } from "./components/packages-view.js";
@@ -200,6 +204,7 @@ class StaleProjectTaskError extends Error {
 let workspaces: WorkspaceState[] = [];
 let activeWorkspaceId: string | null = null;
 let sidebarWidth = 320;
+let compactSidebarOverlayOpen = false;
 let removeSidebarResizeHandlers: (() => void) | null = null;
 let removeTerminalDockResizeHandlers: (() => void) | null = null;
 let removeFileSplitResizeHandlers: (() => void) | null = null;
@@ -2054,6 +2059,19 @@ function syncSidebarCollapseToggleButton(): void {
 	const collapsed = isSidebarCollapsedState();
 	button.classList.toggle("hidden", !collapsed);
 	button.classList.toggle("collapsed", collapsed);
+	button.setAttribute("aria-expanded", compactSidebarOverlayOpen ? "true" : "false");
+}
+
+function toggleSidebarFromChrome(): void {
+	const compact = window.matchMedia("(max-width: 760px)").matches;
+	compactSidebarOverlayOpen = toggleCompactSidebarOverlay(compact, compactSidebarOverlayOpen);
+	document
+		.querySelector<HTMLElement>(".content-shell")
+		?.classList.toggle("compact-sidebar-open", compactSidebarOverlayOpen);
+	if (!compact) {
+		sidebar?.toggleCollapsed();
+	}
+	syncSidebarCollapseToggleButton();
 }
 
 function applySidebarWidth(): void {
@@ -2071,10 +2089,11 @@ function assertProjectTaskCurrent(version: number): void {
 function queueProjectTask(
 	task: (version: number) => Promise<void>,
 	onError?: (err: unknown) => void,
-	options: { invalidatePending?: boolean; label?: string } = {},
+	options: { invalidatePending?: boolean; label?: string; onDiscarded?: () => void } = {},
 ): Promise<void> {
 	const invalidatePending = options.invalidatePending ?? true;
 	const label = options.label ?? "project-task";
+	const onDiscarded = options.onDiscarded;
 	const version = invalidatePending ? ++projectSwitchVersion : projectSwitchVersion;
 	recordDebugTrace(`queue ${label} v=${version}${invalidatePending ? "" : " (keep-version)"}`);
 	projectSwitchTask = projectSwitchTask
@@ -2087,11 +2106,13 @@ function queueProjectTask(
 		.catch((err) => {
 			if (err instanceof StaleProjectTaskError) {
 				recordDebugTrace(`stale ${label} v=${version}`);
+				onDiscarded?.();
 				return;
 			}
 			const message = err instanceof Error ? err.message : String(err);
 			if (version !== projectSwitchVersion) {
 				recordDebugTrace(`ignored-error ${label} v=${version}: ${message}`);
+				onDiscarded?.();
 				return;
 			}
 			if (isCliMissingError(message)) {
@@ -2137,6 +2158,8 @@ async function renameSessionFromWorkspace(projectId: string, sessionPath: string
 
 	ensureWorkspaceContentState(workspace);
 	const targetTab = workspace.sessionTabs.find((tab) => normalizeSessionPath(tab.sessionPath) === normalizeSessionPath(sessionPath));
+	const previousTabTitle = targetTab?.title ?? "";
+	const previousWorkspaceTitle = workspace.sessionTitle;
 	if (targetTab) {
 		setSessionTabProject(targetTab, project.id, project.path);
 		targetTab.title = trimmedName;
@@ -2148,6 +2171,7 @@ async function renameSessionFromWorkspace(projectId: string, sessionPath: string
 	}
 
 	let failed = false;
+	let persisted = false;
 	await queueProjectTask(
 		async () => {
 			const normalizedTarget = normalizeSessionPath(sessionPath);
@@ -2157,8 +2181,11 @@ async function renameSessionFromWorkspace(projectId: string, sessionPath: string
 			if (openTargetTab) {
 				const targetRuntime = await ensureRuntimeForSessionTab(workspace, openTargetTab, project.path, activeTarget);
 				await targetRuntime.bridge.setSessionName(trimmedName);
+				persisted = true;
 				if (activeTarget) {
-					await chatView?.refreshFromBackend({ throwOnError: true });
+					await chatView?.refreshFromBackend({ throwOnError: true }).catch((err) => {
+						console.warn("Session renamed but chat refresh failed:", err);
+					});
 				}
 			} else {
 				const maintenanceBridge = new RpcBridge(uid("rename_rpc"));
@@ -2166,8 +2193,9 @@ async function renameSessionFromWorkspace(projectId: string, sessionPath: string
 				try {
 					await maintenanceBridge.start({ cliPath: findCliPath(), piPath: findPiBinaryPath(), cwd: project.path });
 					const switched = await maintenanceBridge.switchSession(sessionPath);
-					if (switched.cancelled) return;
+					if (switched.cancelled) throw new Error("Session rename was cancelled");
 					await maintenanceBridge.setSessionName(trimmedName);
+					persisted = true;
 				} finally {
 					await maintenanceBridge.stop().catch(() => {
 						/* ignore */
@@ -2183,12 +2211,34 @@ async function renameSessionFromWorkspace(projectId: string, sessionPath: string
 			await applyWorkspacePane(workspace);
 		},
 		(err) => {
+			if (persisted) {
+				console.warn("Session rename persisted but follow-up refresh failed:", err);
+				return;
+			}
 			failed = true;
 			console.error("Failed to rename session:", err);
 			chatView?.notify(t("app.errors.renameSession"), "error");
 		},
-		{ label: "sidebar-session-rename" },
+		{
+			label: "sidebar-session-rename",
+			onDiscarded: () => {
+				if (!persisted) failed = true;
+			},
+		},
 	);
+
+	if (!persisted) {
+		failed = true;
+	}
+	if (targetTab && shouldRollbackSessionTitle(persisted, failed, targetTab.title === trimmedName)) {
+		targetTab.title = previousTabTitle;
+		if (workspace.activeSessionTabId === targetTab.id && workspace.sessionTitle === trimmedName) {
+			workspace.sessionTitle = previousWorkspaceTitle;
+		}
+		persistWorkspaces();
+		syncWorkspaceTabsBar();
+		syncContentTabsBar(workspace);
+	}
 
 	return !failed;
 }
@@ -5314,18 +5364,18 @@ function renderApp(): void {
 		html`
 			<div class="app-shell">
 				<pre id="runtime-debug-overlay" class="runtime-debug-overlay ${shouldShowDebugOverlay() ? "" : "hidden"}"></pre>
-				<div class="content-shell">
+					<div class="content-shell ${compactSidebarOverlayOpen ? "compact-sidebar-open" : ""}">
 					<div id="sidebar-container"></div>
 					<div id="sidebar-resize-handle" title=${t("app.chrome.resizeSidebar")}></div>
 					<div id="main-pane">
 						<button
-							id="sidebar-collapse-toggle"
-							class="workspace-sidebar-toggle ${isSidebarCollapsedState() ? "collapsed" : "hidden"}"
-							title=${t("app.chrome.toggleSidebar")}
-							@click=${() => {
-								sidebar?.toggleCollapsed();
-								syncSidebarCollapseToggleButton();
-							}}
+								id="sidebar-collapse-toggle"
+								class="workspace-sidebar-toggle ${isSidebarCollapsedState() ? "collapsed" : "hidden"}"
+								title=${t("app.chrome.toggleSidebar")}
+								aria-label=${t("app.chrome.toggleSidebar")}
+								@click=${() => {
+									toggleSidebarFromChrome();
+								}}
 						>
 							<svg viewBox="0 0 16 16" aria-hidden="true">
 								<path d="M3 3.5h10v9H3z" />
@@ -5431,15 +5481,44 @@ function renderApp(): void {
 			if (!title) return;
 
 			const sessionTab = workspace.sessionTabs.find((tab) => tab.id === tabId);
-			if (sessionTab) {
-				sessionTab.title = title;
-				if (workspace.activeSessionTabId === sessionTab.id) {
-					workspace.sessionTitle = title;
-				}
-				persistWorkspaces();
-				syncWorkspaceTabsBar();
-				syncContentTabsBar(workspace);
+			if (!sessionTab) return;
+			const projectId = getSessionTabProjectId(sessionTab) ?? getWorkspaceActiveProjectId(workspace);
+			const sessionPath = normalizeSessionPath(sessionTab.sessionPath ?? "");
+			if (projectId && sessionPath) {
+				void renameSessionFromWorkspace(projectId, sessionPath, title);
+				return;
 			}
+
+			// 尚未落盘的新会话没有可持久化的 session 文件，先保留本地标题；
+			// 首次消息创建文件后，既有 workspace/session 同步链路会继续沿用该标题。
+			sessionTab.title = title;
+			if (workspace.activeSessionTabId === sessionTab.id) {
+				workspace.sessionTitle = title;
+			}
+			persistWorkspaces();
+			syncWorkspaceTabsBar();
+			syncContentTabsBar(workspace);
+		});
+		contentTabsBar.setOnTitleRename(async (nextTitle) => {
+			const workspace = getActiveWorkspace();
+			if (!workspace) return false;
+			ensureWorkspaceContentState(workspace);
+			const title = nextTitle.trim();
+			if (!title) return false;
+
+			const sessionTab = getActiveSessionTab(workspace);
+			const projectId = getSessionTabProjectId(sessionTab) ?? getWorkspaceActiveProjectId(workspace);
+			const sessionPath = normalizeSessionPath(sessionTab.sessionPath ?? "");
+			if (projectId && sessionPath) {
+				return renameSessionFromWorkspace(projectId, sessionPath, title);
+			}
+
+			sessionTab.title = title;
+			workspace.sessionTitle = title;
+			persistWorkspaces();
+			syncWorkspaceTabsBar();
+			syncContentTabsBar(workspace);
+			return true;
 		});
 
 		contentTabsBar.setOnClose((tabId) => {
@@ -6182,8 +6261,19 @@ function setupThemeSyncListeners(): void {
 	window.addEventListener(DESKTOP_APPEARANCE_PROFILE_CHANGED_EVENT, refreshThemeProjection);
 }
 
+function setupCompactSidebarBreakpointListener(): void {
+	const media = window.matchMedia("(max-width: 760px)");
+	media.addEventListener("change", (event) => {
+		if (event.matches || !compactSidebarOverlayOpen) return;
+		compactSidebarOverlayOpen = false;
+		document.querySelector<HTMLElement>(".content-shell")?.classList.remove("compact-sidebar-open");
+		syncSidebarCollapseToggleButton();
+	});
+}
+
 applyInitialTheme();
 void applyNativeWindowVisualFixes();
 setupThemeSyncListeners();
+setupCompactSidebarBreakpointListener();
 setupKeyboardShortcuts();
 void initialize();

@@ -199,7 +199,9 @@ export function renderChangelogMessageRow<Message extends TimelineMessage>({
 				<div class="assistant-block">
 					<div class="changelog-inline">
 						<button
+							type="button"
 							class="tool-workflow-line changelog-inline-toggle"
+							aria-expanded=${expanded ? "true" : "false"}
 							@click=${() => {
 								onToggleExpanded(message, !expanded);
 							}}
@@ -254,7 +256,9 @@ export function renderCompactionCycleRow({
 				<div class="assistant-block">
 					<div class="compaction-inline">
 						<button
+							type="button"
 							class="tool-workflow-line compaction-inline-toggle"
+							aria-expanded=${cycle.expanded ? "true" : "false"}
 							@click=${() => {
 								onToggleExpanded(!cycle.expanded);
 							}}
@@ -331,7 +335,7 @@ export function renderMessageTimelineRows<Message extends TimelineMessage>({
 			rows.push(renderAssistantMessage(message));
 			continue;
 		}
-		if (message.label === "changelog") {
+		if (message.label === "changelog" || Boolean(message.collapsibleTitle)) {
 			rows.push(renderChangelogMessage(message));
 			continue;
 		}

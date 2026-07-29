@@ -104,6 +104,10 @@ export default {
 	contentTabs: {
 		newTab: "新建会话（当前项目下的新线程）",
 		openTerminal: "打开终端",
+		alwaysOnTopEnable: "将窗口置于最前",
+		alwaysOnTopDisable: "取消窗口置顶",
+		renameTask: "重命名当前任务",
+		renameTaskHint: "双击重命名当前任务",
 		closeTab: "关闭标签页",
 		forkTab: "分叉会话",
 		pinTab: "固定标签页",

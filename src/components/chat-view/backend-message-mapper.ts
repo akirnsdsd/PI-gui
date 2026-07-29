@@ -29,11 +29,15 @@ interface UiMessageLike {
 	role: "user" | "assistant" | "system" | "custom";
 	text: string;
 	toolCalls: ToolCallBlockLike[];
+	startedAt?: number;
+	endedAt?: number;
 	attachments?: PendingImageLike[];
 	thinking?: string;
 	thinkingExpanded?: boolean;
 	isThinkingStreaming?: boolean;
 	label?: string;
+	collapsibleTitle?: string;
+	collapsibleExpanded?: boolean;
 }
 
 interface MapBackendMessagesParams {
@@ -139,9 +143,11 @@ export function mapBackendMessages({
 				mapped.push({
 					id: createId("assistant"),
 					sessionEntryId,
-					role: "assistant",
-					text,
-					thinking: normalizedThinking || undefined,
+						role: "assistant",
+						text,
+						startedAt: pickNumber(raw, ["startedAt", "startTime", "timestamp", "ts"]) ?? undefined,
+						endedAt: pickNumber(raw, ["endedAt", "endTime"]) ?? undefined,
+						thinking: normalizedThinking || undefined,
 					thinkingExpanded: allThinkingExpanded,
 					isThinkingStreaming: false,
 					toolCalls,
@@ -205,12 +211,15 @@ export function mapBackendMessages({
 			case "branchSummary":
 			case "compactionSummary": {
 				const summary = localizeTruncationMarkers(typeof raw.summary === "string" ? raw.summary : extractText(raw.content));
+				const isCompaction = role === "compactionSummary";
 				mapped.push({
 					id: createId(role),
 					sessionEntryId,
 					role: "system",
 					text: summary,
-					label: role === "branchSummary" ? t("timeline.labels.branchSummary") : t("timeline.labels.compactionSummary"),
+					label: isCompaction ? t("timeline.labels.compactionSummary") : t("timeline.labels.branchSummary"),
+					collapsibleTitle: isCompaction ? t("timeline.labels.compactionSummary") : undefined,
+					collapsibleExpanded: isCompaction ? false : undefined,
 					toolCalls: [],
 				});
 				break;

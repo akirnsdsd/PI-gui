@@ -49,6 +49,7 @@
 	--size-toolbar: 46px;
 	--size-toolbar-sm: 36px;
 	--size-top-chrome: 46px;
+	--size-composer-primary-action: 36px;
 
 	/* Layout */
 	--layout-padding-row-y: calc(var(--space-unit) * 1.25);

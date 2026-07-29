@@ -4972,7 +4972,6 @@ export class Sidebar {
 					: html`
 						<div class="sidebar-mode-row">
 							<div class="sidebar-mode-meta">
-								<div class="sidebar-mode-current">${this.mode === "projects" ? t("sidebar.modes.sessions") : t("sidebar.modes.files")}</div>
 								<div class="sidebar-mode-switch">
 									${this.renderModeSwitch()}
 								</div>

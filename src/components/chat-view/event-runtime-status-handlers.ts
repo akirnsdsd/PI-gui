@@ -7,6 +7,7 @@ interface RuntimeMessageLike {
 	errorText?: string;
 	isStreaming?: boolean;
 	isThinkingStreaming?: boolean;
+	endedAt?: number;
 }
 
 interface HandleRuntimeStatusEventContext {
@@ -103,6 +104,7 @@ export function handleRuntimeStatusEvent(
 			if (last && last.role === "assistant") {
 				last.isStreaming = false;
 				last.isThinkingStreaming = false;
+				last.endedAt = last.endedAt ?? Date.now();
 			}
 			context.setRetryStatus("");
 			const runError = context.extractRuntimeErrorMessage(event);
