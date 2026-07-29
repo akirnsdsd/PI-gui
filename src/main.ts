@@ -16,6 +16,10 @@ import { ExtensionUiHandler, normalizeExtensionUiRequest, type McpChipServerInfo
 import { type DraftFileCreatedEvent, FileViewer } from "./components/file-viewer.js";
 import { PackagesView } from "./components/packages-view.js";
 import { SessionBrowser } from "./components/session-browser.js";
+import {
+	normalizeSessionRunOutcome,
+	type SessionRunOutcome,
+} from "./components/sidebar-session-status.js";
 import { SettingsPanel, type SettingsSectionId } from "./components/settings-panel.js";
 import type { ExtensionsViewId } from "./components/settings-extensions.js";
 import { ShortcutsPanel } from "./components/shortcuts-panel.js";
@@ -111,6 +115,7 @@ interface SessionRuntime {
 
 const WORKSPACES_STORAGE_KEY = "pi-desktop.workspaces.v1";
 const WORKSPACES_ACTIVE_STORAGE_KEY = "pi-desktop.workspaces.active.v1";
+const SESSION_RUN_OUTCOMES_STORAGE_KEY = "pi-desktop.session-run-outcomes.v1";
 const LEGACY_PROJECTS_STORAGE_KEY = "pi-desktop.projects.v1";
 const WORKSPACE_DEFAULT_ID = "workspace_default";
 const WORKSPACE_PROJECTS_KEY_PREFIX = "pi-desktop.workspace-projects.v1";
@@ -225,6 +230,8 @@ let debugTraceLines: string[] = [];
 let notificationAttentionListenersBound = false;
 let runtimeRunHadError = new Map<string, boolean>();
 let runtimeRunNotifyObserved = new Map<string, boolean>();
+let sessionRunOutcomesByWorkspace = new Map<string, Map<string, SessionRunOutcome>>();
+let sessionRunOutcomesHydrated = false;
 let syntheticRuntimeNotifyCounter = 0;
 /** RUNTIME-03/04 配置 revision：渠道/扩展/MCP/Skill/auth 配置保存时单调递增；
  * 已连接 runtime 的 configRevision 低于它即为配置过期（stale）。 */
@@ -683,9 +690,105 @@ function resolveRuntimeNotifyTarget(runtime: SessionRuntime): {
 	};
 }
 
+function loadSessionRunOutcomes(): void {
+	if (sessionRunOutcomesHydrated) return;
+	sessionRunOutcomesHydrated = true;
+	try {
+		const raw = localStorage.getItem(SESSION_RUN_OUTCOMES_STORAGE_KEY);
+		if (!raw) return;
+		const parsed = JSON.parse(raw) as Record<string, Record<string, unknown>>;
+		for (const [workspaceId, entries] of Object.entries(parsed)) {
+			if (!workspaceId || !entries || typeof entries !== "object") continue;
+			const outcomes = new Map<string, SessionRunOutcome>();
+			for (const [sessionPath, rawOutcome] of Object.entries(entries)) {
+				const path = normalizeSessionPath(sessionPath);
+				const outcome = normalizeSessionRunOutcome(rawOutcome);
+				if (path && outcome) outcomes.set(path, outcome);
+			}
+			if (outcomes.size > 0) {
+				sessionRunOutcomesByWorkspace.set(workspaceId, outcomes);
+			}
+		}
+	} catch {
+		sessionRunOutcomesByWorkspace = new Map();
+	}
+}
+
+function persistSessionRunOutcomes(): void {
+	loadSessionRunOutcomes();
+	try {
+		const serialized: Record<string, Record<string, SessionRunOutcome>> = {};
+		for (const [workspaceId, entries] of sessionRunOutcomesByWorkspace) {
+			if (entries.size === 0) continue;
+			serialized[workspaceId] = Object.fromEntries(entries);
+		}
+		localStorage.setItem(SESSION_RUN_OUTCOMES_STORAGE_KEY, JSON.stringify(serialized));
+	} catch {
+		// ignore
+	}
+}
+
+function setSessionRunOutcomeTarget(
+	target: {
+		workspaceId?: string;
+		tabId?: string;
+		sessionPath?: string;
+	},
+	outcome: SessionRunOutcome | null,
+): void {
+	const workspace = target.workspaceId
+		? workspaces.find((entry) => entry.id === target.workspaceId) ?? null
+		: getActiveWorkspace();
+	if (!workspace) return;
+	ensureWorkspaceContentState(workspace);
+
+	let sessionPath = normalizeSessionPath(target.sessionPath);
+	if (target.tabId) {
+		const tab = workspace.sessionTabs.find((entry) => entry.id === target.tabId) ?? null;
+		sessionPath ||= normalizeSessionPath(tab?.sessionPath);
+	}
+	if (!sessionPath) return;
+
+	loadSessionRunOutcomes();
+	const entries = sessionRunOutcomesByWorkspace.get(workspace.id) ?? new Map<string, SessionRunOutcome>();
+	const previous = entries.get(sessionPath) ?? null;
+	if (previous === outcome) return;
+	if (outcome) {
+		entries.set(sessionPath, outcome);
+		sessionRunOutcomesByWorkspace.set(workspace.id, entries);
+	} else {
+		entries.delete(sessionPath);
+		if (entries.size === 0) {
+			sessionRunOutcomesByWorkspace.delete(workspace.id);
+		}
+	}
+	persistSessionRunOutcomes();
+	if (activeWorkspaceId === workspace.id) {
+		syncContentTabsBar(workspace);
+		syncSidebarSelectionFromWorkspace(workspace);
+	}
+}
+
+function setRuntimeSessionOutcome(runtimeKey: string, outcome: SessionRunOutcome | null): void {
+	const runtime = sessionRuntimes.get(runtimeKey);
+	if (!runtime) return;
+	if (outcome === null) {
+		// A reused runtime may still remember the previous session while the
+		// active tab is a fresh draft. Clear only the tab's current path so a new
+		// task never erases the previous task's completed marker.
+		setSessionRunOutcomeTarget(
+			{ workspaceId: runtime.workspaceId, tabId: runtime.tabId },
+			null,
+		);
+		return;
+	}
+	setSessionRunOutcomeTarget(resolveRuntimeNotifyTarget(runtime), outcome);
+}
+
 function markRuntimeRunStarted(runtimeKey: string): void {
 	runtimeRunHadError.set(runtimeKey, false);
 	runtimeRunNotifyObserved.set(runtimeKey, false);
+	setRuntimeSessionOutcome(runtimeKey, null);
 }
 
 function markRuntimeRunErrored(runtimeKey: string): void {
@@ -735,6 +838,7 @@ function attachNotifyTargetToRequest(
 
 function dispatchSyntheticRunEndNotify(runtime: SessionRuntime, source: "active" | "background"): void {
 	const state = consumeRuntimeRunState(runtime.key);
+	setSessionRunOutcomeTarget(resolveRuntimeNotifyTarget(runtime), state.hadError ? "failed" : "completed");
 	if (state.hadNotify) return;
 
 	const request: Record<string, unknown> = {
@@ -3068,6 +3172,7 @@ function syncSidebarSelectionFromWorkspace(workspace: WorkspaceState | null = ge
 		sidebar.setActiveFilePath(null);
 		sidebar.setSuppressedSessionPaths([]);
 		sidebar.setAttentionSessions([]);
+		sidebar.setSessionRunOutcomes([]);
 		sidebar.setTransientSessionDraft(null);
 		chatView?.setWelcomeProjects(sidebar.listProjects(), null);
 		return;
@@ -3095,6 +3200,11 @@ function syncSidebarSelectionFromWorkspace(workspace: WorkspaceState | null = ge
 		.filter((tab) => Boolean(tab.needsAttention) && Boolean(tab.sessionPath))
 		.map((tab) => ({ path: tab.sessionPath as string, message: tab.attentionMessage }));
 	sidebar.setAttentionSessions(attentionEntries);
+	loadSessionRunOutcomes();
+	const outcomeEntries = [...(sessionRunOutcomesByWorkspace.get(workspace.id) ?? new Map())].map(
+		([path, outcome]) => ({ path, outcome }),
+	);
+	sidebar.setSessionRunOutcomes(outcomeEntries);
 
 	sidebar.setActiveFilePath(getActiveFileTab(workspace)?.path ?? null);
 	if (workspace.pane !== "chat") {
@@ -3959,6 +4069,10 @@ function closeWorkspace(workspaceId: string): void {
 	scheduleDiscardEphemeralSessionTabs(removedWorkspace?.sessionTabs ?? []);
 	removeRuntimesForWorkspace(workspaceId);
 	workspaces.splice(index, 1);
+	loadSessionRunOutcomes();
+	if (sessionRunOutcomesByWorkspace.delete(workspaceId)) {
+		persistSessionRunOutcomes();
+	}
 
 	if (wasActive) {
 		const next = workspaces[index] ?? workspaces[index - 1] ?? workspaces[0];
@@ -6103,6 +6217,10 @@ function renderApp(): void {
 
 		ensureWorkspaceContentState(workspace);
 		const normalizedTarget = normalizeSessionPath(sessionPath);
+		setSessionRunOutcomeTarget(
+			{ workspaceId: workspace.id, sessionPath: normalizedTarget },
+			null,
+		);
 		const removedIndices = workspace.sessionTabs
 			.map((tab, index) => ({ tab, index }))
 			.filter(({ tab }) => normalizeSessionPath(tab.sessionPath) === normalizedTarget)

@@ -14,6 +14,10 @@ import {
 	toggleCompactSidebarOverlay,
 } from "../desktop-ui-behavior.js";
 import { formatPendingFileDisplayName } from "./composer-fragments-view.js";
+import {
+	normalizeSessionRunOutcome,
+	resolveSidebarSessionStatus,
+} from "../sidebar-session-status.js";
 
 let passed = 0;
 let failed = 0;
@@ -187,6 +191,31 @@ const runningTool: WorkflowToolCall = {
 	check("wide sidebar click does not create overlay state", toggleCompactSidebarOverlay(false, true) === false);
 	check("compact model picker stays inside left viewport edge", resolveViewportPopoverLeft(318, 404, 420) === 8);
 	check("wide model picker preserves right anchoring", resolveViewportPopoverLeft(900, 470, 1100) === 430);
+}
+
+{
+	check(
+		"sidebar running state replaces an older completion marker",
+		resolveSidebarSessionStatus(true, false, "completed") === "running",
+	);
+	check(
+		"sidebar completion marker remains visible after runtime suspension",
+		resolveSidebarSessionStatus(false, true, "completed") === "completed",
+	);
+	check(
+		"sidebar failure marker remains distinct",
+		resolveSidebarSessionStatus(false, false, "failed") === "failed",
+	);
+	check(
+		"sidebar suspension is only the idle fallback",
+		resolveSidebarSessionStatus(false, true, null) === "suspended",
+	);
+	check(
+		"unknown persisted sidebar outcomes are discarded",
+		normalizeSessionRunOutcome("running") === null &&
+			normalizeSessionRunOutcome("completed") === "completed" &&
+			normalizeSessionRunOutcome("failed") === "failed",
+	);
 }
 
 {

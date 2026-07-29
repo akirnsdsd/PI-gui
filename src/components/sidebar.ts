@@ -6,6 +6,10 @@ import { html, nothing, render, type TemplateResult } from "lit";
 import { t } from "../i18n/index.js";
 import { alertDialog, confirmDialog, promptDialog } from "./app-dialog.js";
 import { clearActiveDraggedFilePaths, setActiveDraggedFilePaths } from "./file-drag-transfer.js";
+import {
+	resolveSidebarSessionStatus,
+	type SessionRunOutcome,
+} from "./sidebar-session-status.js";
 import { EMOJI_CATALOG } from "./workspace-tabs.js";
 
 export type SidebarMode = "projects" | "files";
@@ -319,6 +323,7 @@ export class Sidebar {
 	private activeFilePath: string | null = null;
 	private runningSessionPaths = new Set<string>();
 	private suspendedSessionPaths = new Set<string>();
+	private sessionRunOutcomes = new Map<string, SessionRunOutcome>();
 	private attentionSessionMessages = new Map<string, string>();
 	private workspaces: SidebarWorkspaceItem[] = [];
 	private activeWorkspaceId: string | null = null;
@@ -509,6 +514,7 @@ export class Sidebar {
 		this.activeFilePath = null;
 		this.runningSessionPaths.clear();
 		this.suspendedSessionPaths.clear();
+		this.sessionRunOutcomes.clear();
 		this.attentionSessionMessages.clear();
 		this.fileTrees.clear();
 		this.fileTreeErrors.clear();
@@ -1078,6 +1084,29 @@ export class Sidebar {
 		}
 
 		this.suspendedSessionPaths = next;
+		this.render();
+	}
+
+	setSessionRunOutcomes(entries: Array<{ path: string; outcome: SessionRunOutcome }>): void {
+		const next = new Map<string, SessionRunOutcome>();
+		for (const entry of entries) {
+			const path = normalizePath(entry.path);
+			if (!path) continue;
+			next.set(path, entry.outcome);
+		}
+
+		if (next.size === this.sessionRunOutcomes.size) {
+			let identical = true;
+			for (const [path, outcome] of next) {
+				if (this.sessionRunOutcomes.get(path) !== outcome) {
+					identical = false;
+					break;
+				}
+			}
+			if (identical) return;
+		}
+
+		this.sessionRunOutcomes = next;
 		this.render();
 	}
 
@@ -4206,12 +4235,43 @@ export class Sidebar {
 		render(this.renderWorkspaceEmojiPicker(), host);
 	}
 
-	private renderSessionPiIcon(running = false, suspended = false): TemplateResult | typeof nothing {
-		if (!running && !suspended) return nothing;
-		const stateClass = running ? "running" : "suspended";
-		const stateTitle = running ? t("sidebar.session.running") : t("sidebar.session.suspended");
+	private renderSessionPiIcon(
+		running = false,
+		suspended = false,
+		outcome: SessionRunOutcome | null = null,
+	): TemplateResult | typeof nothing {
+		const status = resolveSidebarSessionStatus(running, suspended, outcome);
+		if (!status) return nothing;
+		const stateTitle =
+			status === "running"
+				? t("sidebar.session.running")
+				: status === "suspended"
+					? t("sidebar.session.suspended")
+					: status === "completed"
+						? t("sidebar.session.completed")
+						: t("sidebar.session.failed");
+		if (status === "completed") {
+			return html`
+				<span class="sidebar-session-pi completed" title=${stateTitle} role="img" aria-label=${stateTitle}>
+					<svg viewBox="0 0 16 16" aria-hidden="true">
+						<circle cx="8" cy="8" r="5.7"></circle>
+						<path d="m5.2 8.1 1.8 1.8 3.9-4"></path>
+					</svg>
+				</span>
+			`;
+		}
+		if (status === "failed") {
+			return html`
+				<span class="sidebar-session-pi failed" title=${stateTitle} role="img" aria-label=${stateTitle}>
+					<svg viewBox="0 0 16 16" aria-hidden="true">
+						<circle cx="8" cy="8" r="5.7"></circle>
+						<path d="m6 6 4 4M10 6l-4 4"></path>
+					</svg>
+				</span>
+			`;
+		}
 		return html`
-			<span class="sidebar-session-pi ${stateClass}" title=${stateTitle} aria-hidden="true">
+			<span class="sidebar-session-pi ${status}" title=${stateTitle} role="img" aria-label=${stateTitle}>
 				<svg viewBox="0 0 16 16" aria-hidden="true">
 					<path d="M3.3 3.3H10.3V8H8V10.3H5.7V12.7H3.3Z"></path>
 					<path d="M10.3 8H12.7V12.7H10.3Z"></path>
@@ -4267,6 +4327,7 @@ export class Sidebar {
 						: Boolean(session.transient && this.activeProjectId === project.id && !this.activeSessionPath);
 					const runningSession = this.runningSessionPaths.has(normalizedSessionPath);
 					const suspendedSession = !runningSession && this.suspendedSessionPaths.has(normalizedSessionPath);
+					const sessionRunOutcome = this.sessionRunOutcomes.get(normalizedSessionPath) ?? null;
 					const attentionMessage = this.attentionSessionMessages.get(normalizedSessionPath) ?? null;
 					const pinnedSession = this.isSessionPinned(session.path);
 					const prevPinned = index > 0 ? this.isSessionPinned(rows[index - 1]?.session.path ?? "") : false;
@@ -4294,7 +4355,7 @@ export class Sidebar {
 						>
 							<span class="sidebar-project-emoji-inline">${normalizeProjectEmoji(project.emoji)}</span>
 							<span class="sidebar-session-leading">
-								${this.renderSessionPiIcon(runningSession, suspendedSession)}
+								${this.renderSessionPiIcon(runningSession, suspendedSession, sessionRunOutcome)}
 							</span>
 							<span class="sidebar-chrono-main">
 								<span class="sidebar-chrono-name sidebar-session-name ${attentionMessage ? "needs-attention" : ""}">${isForkChild ? this.renderSessionForkIcon() : nothing}${isForkChild ? this.forkChildDisplayName(session) : session.name}</span>
@@ -4363,6 +4424,7 @@ export class Sidebar {
 		const activeSession = normalizedSessionPath === this.activeSessionPath;
 		const runningSession = this.runningSessionPaths.has(normalizedSessionPath);
 		const suspendedSession = !runningSession && this.suspendedSessionPaths.has(normalizedSessionPath);
+		const sessionRunOutcome = this.sessionRunOutcomes.get(normalizedSessionPath) ?? null;
 		const attentionMessage = this.attentionSessionMessages.get(normalizedSessionPath) ?? null;
 		const sessionRenameActive =
 			Boolean(this.sessionRenameDraft) &&
@@ -4371,7 +4433,7 @@ export class Sidebar {
 		return html`
 			<div class="sidebar-session-row sidebar-pinned-session-row ${activeSession ? "active" : ""} pinned">
 				<span class="sidebar-session-leading">
-					${this.renderSessionPiIcon(runningSession, suspendedSession)}
+					${this.renderSessionPiIcon(runningSession, suspendedSession, sessionRunOutcome)}
 				</span>
 				<button
 					class="sidebar-session ${activeSession ? "active-session" : ""}"
@@ -4578,6 +4640,7 @@ export class Sidebar {
                                                             : Boolean(session.transient && this.activeProjectId === project.id && !this.activeSessionPath);
                                                         const runningSession = this.runningSessionPaths.has(normalizedSessionPath);
                                                         const suspendedSession = !runningSession && this.suspendedSessionPaths.has(normalizedSessionPath);
+                                                        const sessionRunOutcome = this.sessionRunOutcomes.get(normalizedSessionPath) ?? null;
                                                         const attentionMessage = this.attentionSessionMessages.get(normalizedSessionPath) ?? null;
                                                         const sessionRenameActive =
                                                             Boolean(this.sessionRenameDraft) &&
@@ -4589,7 +4652,7 @@ export class Sidebar {
                                                         return html`
                                                             <div class="sidebar-session-row ${activeSession ? "active" : ""} ${isForkChild ? "sidebar-session-row--fork" : ""}">
                                                                 <span class="sidebar-session-leading">
-                                                                    ${this.renderSessionPiIcon(runningSession, suspendedSession)}
+                                                                    ${this.renderSessionPiIcon(runningSession, suspendedSession, sessionRunOutcome)}
                                                                 </span>
                                                                 <button
                                                                     class="sidebar-session ${activeSession ? "active-session" : ""}"

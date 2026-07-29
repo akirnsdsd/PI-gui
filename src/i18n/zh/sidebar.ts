@@ -111,6 +111,8 @@ export default {
 		noMatch: "没有符合筛选条件的会话。",
 		running: "会话运行中",
 		suspended: "会话已挂起（进程已停止，打开时恢复）",
+		completed: "任务已完成",
+		failed: "任务执行失败",
 		fork: "从消息分叉…",
 		forkBadge: "分叉会话",
 		// 分支会话显示名前缀；与 chatMisc.history.forkSessionName 的前缀保持一致。
