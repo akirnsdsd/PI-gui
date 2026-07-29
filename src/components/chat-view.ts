@@ -434,7 +434,7 @@ function uiIcon(name: "edit" | "retry" | "copy" | "attach" | "send" | "stop" | "
 		case "send":
 			return html`<svg class="send-arrow-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 12.7V3.6"></path><path d="M4.6 7L8 3.6 11.4 7"></path></svg>`;
 		case "stop":
-			return html`<svg class="stop-square-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.9" y="4.9" width="6.2" height="6.2" rx="1.2"></rect></svg>`;
+			return html`<svg class="stop-square-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.35" y="3.35" width="9.3" height="9.3" rx="1.65"></rect></svg>`;
 		case "spinner":
 			return html`<svg class="spinner-icon" viewBox="0 0 16 16" aria-hidden="true"><circle class="spinner-track" cx="8" cy="8" r="5.4"></circle><path class="spinner-arc" d="M8 2.6a5.4 5.4 0 0 1 5.4 5.4"></path></svg>`;
 		case "spark":
@@ -521,6 +521,7 @@ export class ChatView {
 	private settingThinking = false;
 	private unsupportedThinkingLevelsByModel = new Map<string, Set<ThinkingLevel>>();
 	private modelPickerOpen = false;
+	private modelPickerSubmenuOpen = false;
 	private addMenuOpen = false;
 	private thinkingMenuOpen = false;
 	private modelPickerActiveProvider = "";
@@ -775,6 +776,7 @@ export class ChatView {
 
 	private resetSessionUiTransientState(): void {
 		this.modelPickerOpen = false;
+		this.modelPickerSubmenuOpen = false;
 		this.addMenuOpen = false;
 		this.thinkingMenuOpen = false;
 		this.selectedSkillDraft = null;
@@ -1489,14 +1491,19 @@ export class ChatView {
 
 	private setModelPickerActiveProvider(provider: string): void {
 		const normalized = normalizeText(provider);
-		if (!normalized || this.modelPickerActiveProvider === normalized) return;
+		if (!normalized) return;
+		const changed = this.modelPickerActiveProvider !== normalized || !this.modelPickerSubmenuOpen;
 		this.modelPickerActiveProvider = normalized;
+		this.modelPickerSubmenuOpen = true;
+		if (!changed) return;
 		this.render();
+		this.clampModelPickerPopover();
 	}
 
 	private closeModelPicker(options: { focusComposer?: boolean } = {}): void {
 		if (!this.modelPickerOpen) return;
 		this.modelPickerOpen = false;
+		this.modelPickerSubmenuOpen = false;
 		this.render();
 		if (options.focusComposer) {
 			requestAnimationFrame(() => this.focusInput());
@@ -1517,6 +1524,7 @@ export class ChatView {
 			}
 		}
 		this.modelPickerOpen = true;
+		this.modelPickerSubmenuOpen = false;
 		this.addMenuOpen = false;
 		this.thinkingMenuOpen = false;
 		this.render();
@@ -1556,13 +1564,28 @@ export class ChatView {
 			const rootRect = root.getBoundingClientRect();
 			const popoverRect = popover.getBoundingClientRect();
 			if (rootRect.width === 0 || popoverRect.width === 0) return;
+			const chatRoot = root.closest<HTMLElement>(".chat-root") ?? this.container.querySelector<HTMLElement>(".chat-root");
+			const chatRect = chatRoot?.getBoundingClientRect();
+			const rootStyle = getComputedStyle(root);
+			const configuredSubmenuWidth = Number.parseFloat(rootStyle.getPropertyValue("--model-picker-submenu-width")) || 204;
+			const submenuGap = Number.parseFloat(rootStyle.getPropertyValue("--model-picker-submenu-gap")) || 3;
 			const viewportLeft = resolveViewportPopoverLeft(
 				rootRect.right,
 				popoverRect.width,
 				window.innerWidth,
 			);
+			const submenu = popover.querySelector<HTMLElement>(".model-picker-model-submenu");
+			const submenuWidth = submenu?.getBoundingClientRect().width || configuredSubmenuWidth;
+			const contentLeft = Math.max(8, (chatRect?.left ?? 0) + 8);
+			const contentRight = Math.min(window.innerWidth - 8, (chatRect?.right ?? window.innerWidth) - 8);
+			const minimumLeftForSubmenu = contentLeft + submenuWidth + submenuGap;
+			const maximumLeft = Math.max(contentLeft, contentRight - popoverRect.width);
+			const clampedLeft = Math.min(
+				Math.max(viewportLeft, minimumLeftForSubmenu),
+				maximumLeft,
+			);
 			popover.style.right = "auto";
-			popover.style.left = `${Math.round(viewportLeft - rootRect.left)}px`;
+			popover.style.left = `${Math.round(clampedLeft - rootRect.left)}px`;
 		});
 	}
 
@@ -5516,6 +5539,7 @@ export class ChatView {
 			currentModelDisplay,
 			currentProviderDisplay,
 			modelPickerOpen: this.modelPickerOpen,
+			modelPickerSubmenuOpen: this.modelPickerSubmenuOpen,
 			loadingModels: this.loadingModels,
 			loadingModelCatalog: this.loadingModelCatalog,
 			providerGroups,

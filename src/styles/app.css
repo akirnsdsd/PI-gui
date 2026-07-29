@@ -5009,6 +5009,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 .user-row {
 	display: flex;
 	justify-content: flex-end;
+	margin-bottom: 8px;
 }
 
 .message-shell {
@@ -6353,7 +6354,8 @@ markdown-block.markdown-content {
 	left: 0;
 	right: 0;
 	bottom: 0;
-	padding: 0 16px 20px;
+	z-index: 50;
+	padding: 0 16px 8px;
 	background: linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--bg) 76%, transparent) 36%, var(--bg) 100%);
 	pointer-events: none;
 }
@@ -6562,6 +6564,8 @@ markdown-block.markdown-content {
 	/* 允许在窄窗口下收缩，触发器内的文字以 ellipsis 截断而不是换行溢出 */
 	min-width: 0;
 	flex: 0 1 auto;
+	--model-picker-submenu-width: 204px;
+	--model-picker-submenu-gap: 3px;
 }
 
 .model-picker-trigger {
@@ -6620,24 +6624,20 @@ markdown-block.markdown-content {
 }
 
 .model-picker-popover {
-	/* 触发器位于控制区右侧，弹层右对齐锚定、向左展开，避免溢出窗口右缘 */
+	/* 渠道菜单保持紧凑；hover/focus 某个渠道后，模型作为独立子菜单向左展开。 */
 	right: 0;
 	display: grid;
-	grid-template-columns: minmax(132px, 176px) minmax(188px, 270px);
-	/* 底部「管理渠道…」一行：内容区占满剩余高度，footer 自适应 */
-	grid-template-rows: 1fr auto;
+	grid-template-rows: minmax(0, 1fr) auto;
 	box-sizing: border-box;
-	width: min(470px, calc(100vw - 16px));
+	width: min(204px, calc(100vw - 16px));
 	min-width: 0;
 	max-width: calc(100vw - 16px);
 	height: 244px;
-	/* 双栏网格布局：卡片 padding 归零，间距由两栏与 footer 自行承担，滚动也在栏内 */
 	padding: 0;
-	overflow: hidden;
+	overflow: visible;
 }
 
 .model-picker-footer {
-	grid-column: 1 / -1;
 	display: flex;
 	padding: 4px;
 	border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -6662,11 +6662,6 @@ markdown-block.markdown-content {
 	color: var(--text);
 }
 
-/* 空态（无已配置渠道）时提示文字占满内容区 */
-.model-picker-popover > .model-picker-empty:first-child {
-	grid-column: 1 / -1;
-}
-
 .model-picker-providers {
 	display: grid;
 	gap: 4px;
@@ -6674,9 +6669,9 @@ markdown-block.markdown-content {
 	grid-auto-rows: min-content;
 	align-content: start;
 	height: 100%;
+	min-height: 0;
 	overflow-x: hidden;
 	overflow-y: auto;
-	border-right: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 	background: color-mix(in srgb, var(--bg-soft) 42%, transparent);
 }
 
@@ -6696,11 +6691,18 @@ markdown-block.markdown-content {
 	align-items: center;
 	justify-content: space-between;
 	gap: 6px;
-	/* 右侧留出悬浮登录/退出按钮的位置，避免遮挡渠道名（按钮宽约 56px + 3px 偏移） */
-	padding: 0 60px 0 8px;
+	padding: 0 28px 0 8px;
 	font-size: 12px;
 	cursor: pointer;
 	min-width: 0;
+}
+
+.model-picker-provider-caret {
+	position: absolute;
+	right: 9px;
+	font-size: 17px;
+	line-height: 1;
+	color: var(--muted-2);
 }
 
 /* 未配置渠道：名称 + 小字说明两行布局 */
@@ -6790,6 +6792,22 @@ markdown-block.markdown-content {
 	overflow-y: auto;
 }
 
+.model-picker-model-submenu {
+	position: absolute;
+	right: calc(100% + var(--model-picker-submenu-gap));
+	top: 0;
+	box-sizing: border-box;
+	width: min(var(--model-picker-submenu-width), calc(100vw - 16px));
+	height: auto;
+	min-height: 40px;
+	max-height: 244px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	background: var(--bg-elev);
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+	z-index: 2;
+}
+
 .model-picker-auth-hint {
 	margin: 2px 4px 4px;
 	padding: 6px 8px;
@@ -6810,18 +6828,30 @@ markdown-block.markdown-content {
 	padding: 0 8px;
 	font-size: 12px;
 	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
 
 /* WebKit 下 button 自身的 text-overflow 对匿名内容盒不生效，ellipsis 要落在内部块级 span 上 */
-.model-picker-model > span {
+.model-picker-model-label {
 	display: block;
+	flex: 1;
+	min-width: 0;
 	max-width: 100%;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+
+.model-picker-model-check {
+	flex: 0 0 auto;
+	color: var(--text);
+	font-size: 13px;
 }
 
 .model-picker-model:hover,
@@ -7028,8 +7058,8 @@ markdown-block.markdown-content {
 }
 
 .stop-btn .stop-square-icon {
-	width: 13px;
-	height: 13px;
+	width: 16px;
+	height: 16px;
 	stroke-width: 0;
 	fill: currentColor;
 }
@@ -7896,7 +7926,7 @@ markdown-block.markdown-content {
 	}
 
 	.composer-shell {
-		padding: 0 16px 12px;
+		padding: 0 16px 6px;
 	}
 
 	.model-picker-trigger {
@@ -8024,7 +8054,12 @@ markdown-block.markdown-content {
 	}
 
 	.model-picker-popover {
-		grid-template-columns: minmax(112px, 42%) minmax(0, 1fr);
+		width: min(168px, calc(100vw - 16px));
+	}
+
+	.model-picker-root {
+		--model-picker-submenu-width: 176px;
+		--model-picker-submenu-gap: 2px;
 	}
 
 	.thinking-select-trigger {
@@ -8045,7 +8080,7 @@ markdown-block.markdown-content {
  * z-index 层级表（全 app 统一，新增浮层按此归位）：
  *   0-2     内容层：tab 分隔线、resize 把手等局部装饰
  *   5-8     chrome 层：tab 拖拽幽灵、滚动按钮
- *   12-40   局部弹层（absolute，限父容器内）：侧栏/composer 下拉、review 抽屉(24)
+ *   12-50   局部弹层（absolute，限父容器内）：侧栏/composer 下拉、review 抽屉(24)
  *   1100    全局 popover（fixed）：settings-select-popover
  *   1200    全局右键菜单：sidebar-context-menu(+backdrop 1199)
  *   1250    设置子对话框：settings-subdialog-backdrop

@@ -63,6 +63,7 @@ interface RenderComposerControlsViewParams {
 	currentModelDisplay: string;
 	currentProviderDisplay: string;
 	modelPickerOpen: boolean;
+	modelPickerSubmenuOpen: boolean;
 	loadingModels: boolean;
 	loadingModelCatalog: boolean;
 	providerGroups: ModelPickerProviderGroup[];
@@ -110,6 +111,7 @@ export function renderComposerControlsView({
 	currentModelDisplay,
 	currentProviderDisplay,
 	modelPickerOpen,
+	modelPickerSubmenuOpen,
 	loadingModels,
 	loadingModelCatalog,
 	providerGroups,
@@ -249,7 +251,7 @@ export function renderComposerControlsView({
 
 					${modelPickerOpen
 						? html`
-							<div class="model-picker-popover composer-popover-card" role="listbox" aria-label=${t("composer.controls.availableModels")}>
+							<div class="model-picker-popover composer-popover-card" role="menu" aria-label=${t("composer.controls.availableModels")}>
 								${providerGroups.length === 0
 									? loadingModels || loadingModelCatalog
 										? html`<div class="model-picker-empty ui-loading-host" role="status" aria-label=${t("composer.controls.loadingModels")}><span class="ui-loading-spinner small"></span></div>`
@@ -277,6 +279,7 @@ export function renderComposerControlsView({
 														>
 															<span class="model-picker-provider-label">${group.providerLabel}</span>
 															${group.authConfigured ? nothing : html`<span class="model-picker-provider-sub">${t("composer.controls.providerSetupHint")}</span>`}
+															<span class="model-picker-provider-caret" aria-hidden="true">›</span>
 														</button>
 														<button
 															type="button"
@@ -296,47 +299,6 @@ export function renderComposerControlsView({
 												`;
 											})}
 										</div>
-										<div class="model-picker-models">
-											${activeProviderGroup
-												? html`
-													${activeProviderGroup.models.length === 0
-														? html`
-															<div class="model-picker-empty">${t("composer.controls.providerNoModels")}</div>
-															${activeGroupEmptyHint
-																? html`<div class="model-picker-auth-hint">${activeGroupEmptyHint}</div>`
-																: nothing}
-														`
-														: html`
-															${activeGroupUnauthHint
-																? html`<div class="model-picker-auth-hint">${activeGroupUnauthHint}</div>`
-																: nothing}
-															${activeProviderGroup.models.map((model) => {
-																const nextValue = `${model.provider}::${model.id}`;
-																const isActive = model.provider === currentProvider && model.id === currentModelId;
-																const isDisabled = !model.selectable || !activeProviderGroup.authConfigured;
-																return html`
-																	<button
-																		type="button"
-																		class="model-picker-model ${isActive ? "active" : ""} ${isDisabled ? "disabled" : ""}"
-																		title=${isDisabled
-																			? t("composer.controls.modelSetupRequired", { provider: formatProviderDisplayName(model.provider), model: model.id })
-																			: `${formatProviderDisplayName(model.provider)} / ${model.id}`}
-																		?disabled=${interactionLocked || settingModel || isDisabled}
-																		@click=${() => {
-																			if (isDisabled) return;
-																			onCloseModelPicker();
-																			if (nextValue === currentModelValue) return;
-																			void onSelectModel(model.provider, model.id);
-																		}}
-																	>
-																		<span>${formatModelDisplayName(model.id)}</span>
-																	</button>
-																`;
-															})}
-														`}
-												`
-												: html`<div class="model-picker-empty">${t("composer.controls.noModels")}</div>`}
-										</div>
 									`}
 									<div class="model-picker-footer">
 										<button
@@ -348,6 +310,52 @@ export function renderComposerControlsView({
 											${t("composer.controls.manageChannels")}
 										</button>
 									</div>
+									${modelPickerSubmenuOpen
+										? html`
+											<div class="model-picker-models model-picker-model-submenu" role="listbox" aria-label=${activeProviderGroup?.providerLabel ?? t("composer.controls.availableModels")}>
+												${activeProviderGroup
+													? html`
+														${activeProviderGroup.models.length === 0
+															? html`
+																<div class="model-picker-empty">${t("composer.controls.providerNoModels")}</div>
+																${activeGroupEmptyHint
+																	? html`<div class="model-picker-auth-hint">${activeGroupEmptyHint}</div>`
+																	: nothing}
+															`
+															: html`
+																${activeGroupUnauthHint
+																	? html`<div class="model-picker-auth-hint">${activeGroupUnauthHint}</div>`
+																	: nothing}
+																${activeProviderGroup.models.map((model) => {
+																	const nextValue = `${model.provider}::${model.id}`;
+																	const isActive = model.provider === currentProvider && model.id === currentModelId;
+																	const isDisabled = !model.selectable || !activeProviderGroup.authConfigured;
+																	return html`
+																		<button
+																			type="button"
+																			class="model-picker-model ${isActive ? "active" : ""} ${isDisabled ? "disabled" : ""}"
+																			title=${isDisabled
+																				? t("composer.controls.modelSetupRequired", { provider: formatProviderDisplayName(model.provider), model: model.id })
+																				: `${formatProviderDisplayName(model.provider)} / ${model.id}`}
+																			?disabled=${interactionLocked || settingModel || isDisabled}
+																			@click=${() => {
+																				if (isDisabled) return;
+																				onCloseModelPicker();
+																				if (nextValue === currentModelValue) return;
+																				void onSelectModel(model.provider, model.id);
+																			}}
+																		>
+																			<span class="model-picker-model-label">${formatModelDisplayName(model.id)}</span>
+																			${isActive ? html`<span class="model-picker-model-check" aria-hidden="true">✓</span>` : nothing}
+																		</button>
+																	`;
+																})}
+															`}
+													`
+													: html`<div class="model-picker-empty">${t("composer.controls.noModels")}</div>`}
+											</div>
+										`
+										: nothing}
 							</div>
 						`
 						: nothing}
