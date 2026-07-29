@@ -410,6 +410,7 @@ export function renderComposerControlsView({
 					${isStreaming
 						? html`
 							<button
+								type="button"
 								class="send-btn stop-btn"
 								title=${t("composer.controls.stopGeneration")}
 								aria-label=${t("composer.controls.stopGeneration")}
@@ -425,6 +426,7 @@ export function renderComposerControlsView({
 						: sendingPrompt
 							? html`
 								<button
+									type="button"
 									class="send-btn pending-send"
 									title=${t("composer.controls.sending")}
 									aria-label=${t("composer.controls.sending")}
@@ -435,6 +437,7 @@ export function renderComposerControlsView({
 							`
 							: html`
 								<button
+									type="button"
 									class="send-btn primary-send"
 									?disabled=${interactionLocked || !canSend}
 									title=${t("composer.controls.send")}

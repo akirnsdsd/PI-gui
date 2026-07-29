@@ -53,7 +53,7 @@ export function renderPendingImagesView(
 ): TemplateResult | typeof nothing {
 	if (images.length === 0) return nothing;
 	return html`
-		<div class="composer-image-cards" aria-label=${t("composer.fragments.imageAttachments")}>
+		<div class="composer-image-cards composer-attachment-strip" aria-label=${t("composer.fragments.imageAttachments")}>
 			${images.map(
 				(img) => html`
 					<div
@@ -92,6 +92,13 @@ function fileBadgeLabel(name: string): string {
 	return match[1].toUpperCase();
 }
 
+export function formatPendingFileDisplayName(
+	name: string,
+	truncateText: (value: string, len: number) => string,
+): string {
+	return truncateText(name, 24);
+}
+
 export function renderPendingFileReferencesView(
 	files: PendingComposerFileView[],
 	truncateText: (value: string, len: number) => string,
@@ -99,13 +106,13 @@ export function renderPendingFileReferencesView(
 ): TemplateResult | typeof nothing {
 	if (files.length === 0) return nothing;
 	return html`
-		<div class="composer-attachments inline file" aria-label=${t("composer.fragments.fileReferences")}>
+		<div class="composer-attachments composer-attachment-strip file" aria-label=${t("composer.fragments.fileReferences")}>
 			${files.map(
 				(file) => html`
-					<div class="composer-attachment" title=${file.path}>
-						<span class="composer-attachment-thumb file" aria-hidden="true">${fileBadgeLabel(file.name)}</span>
-						<span class="composer-attachment-name">${truncateText(file.token, 11)}</span>
-						<button class="composer-attachment-remove" title=${t("composer.fragments.removeFileReference")} @click=${() => onRemoveFile(file.id)}>✕</button>
+						<div class="composer-attachment" title=${file.path}>
+							<span class="composer-attachment-thumb file" aria-hidden="true">${fileBadgeLabel(file.name)}</span>
+							<span class="composer-attachment-name">${formatPendingFileDisplayName(file.name, truncateText)}</span>
+						<button type="button" class="composer-attachment-remove" title=${t("composer.fragments.removeFileReference")} @click=${() => onRemoveFile(file.id)}>✕</button>
 					</div>
 				`,
 			)}
@@ -123,7 +130,7 @@ export function renderComposerSkillDraftPillView(
 		<div class="composer-skill-draft-pill inline">
 			<span class="composer-skill-draft-icon" aria-hidden="true">${skillIcon}</span>
 			<span class="composer-skill-draft-name">${draft.name}</span>
-			<button class="composer-skill-draft-remove" title=${t("composer.fragments.removeSkill")} @click=${onRemoveDraft}>✕</button>
+			<button type="button" class="composer-skill-draft-remove" title=${t("composer.fragments.removeSkill")} @click=${onRemoveDraft}>✕</button>
 		</div>
 	`;
 }

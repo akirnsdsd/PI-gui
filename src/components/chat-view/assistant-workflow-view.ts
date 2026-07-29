@@ -1,6 +1,11 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { t } from "../../i18n/index.js";
-import type { AssistantWorkflow, WorkflowToolCall, WorkflowToolCallGroup } from "./workflow-utils.js";
+import {
+	resolveWorkflowDurationMs,
+	type AssistantWorkflow,
+	type WorkflowToolCall,
+	type WorkflowToolCallGroup,
+} from "./workflow-utils.js";
 
 type WorkflowExpansionState = {
 	total: number;
@@ -62,10 +67,13 @@ export function renderAssistantWorkflowView({
 		workflow.isTerminal,
 	);
 	const failed = workflow.toolCalls.filter((toolCall) => toolCall.isError).length;
-	const durationMs =
-		workflow.startedAt > 0
-			? (running > 0 ? Date.now() : Math.max(workflow.endedAt, workflow.startedAt)) - workflow.startedAt
-			: 0;
+	const workflowRunning = workflow.isStreaming || running > 0;
+	const durationMs = resolveWorkflowDurationMs(
+		workflow.startedAt,
+		workflow.endedAt,
+		workflowRunning,
+		Date.now(),
+	);
 	const durationLabel = durationMs > 0 ? formatDuration(durationMs) : "0s";
 	const summaryPrimary = durationLabel;
 	const completed = Math.max(0, total - running - failed);
@@ -147,7 +155,9 @@ export function renderAssistantWorkflowView({
 			<div class="message-shell assistant-message-shell">
 				<div class="assistant-block">
 					<button
+						type="button"
 						class="tool-workflow-summary"
+						aria-expanded=${expanded ? "true" : "false"}
 						@click=${() => {
 							toggleToolWorkflowExpanded(workflow.id, autoExpanded, expanded);
 						}}
@@ -169,7 +179,12 @@ export function renderAssistantWorkflowView({
 										const thinkingAnimating = running === 0 && entry.animating;
 										return html`
 											<div class="tool-workflow-thinking">
-												<button class="tool-workflow-thinking-toggle ${thinkingAnimating ? "animating" : "done"}" @click=${() => toggleWorkflowThinkingExpanded(entry.id)}>
+												<button
+													type="button"
+													class="tool-workflow-thinking-toggle ${thinkingAnimating ? "animating" : "done"}"
+													aria-expanded=${thinkingExpanded ? "true" : "false"}
+													@click=${() => toggleWorkflowThinkingExpanded(entry.id)}
+												>
 													${thinkingAnimating ? html`<span class="tool-workflow-inline-pi" aria-hidden="true">${piGlyphIcon()}</span>` : nothing}
 													<span class="tool-workflow-thinking-text">${t("timeline.workflow.thinking")}</span>
 												</button>
@@ -195,7 +210,9 @@ export function renderAssistantWorkflowView({
 									return html`
 										<div class="tool-workflow-item">
 											<button
+												type="button"
 												class="tool-workflow-line ${groupRunning ? "running" : ""}"
+												aria-expanded=${groupExpanded ? "true" : "false"}
 												@click=${() => toggleToolGroupExpanded(workflow.id, group.id)}
 											>
 												${groupRunning ? html`<span class="tool-workflow-inline-pi" aria-hidden="true">${piGlyphIcon()}</span>` : nothing}

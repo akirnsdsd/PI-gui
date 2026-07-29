@@ -20,6 +20,8 @@ export interface WorkflowMessage {
 	role: WorkflowRole;
 	text: string;
 	toolCalls: WorkflowToolCall[];
+	startedAt?: number;
+	endedAt?: number;
 	thinking?: string;
 	errorText?: string;
 	isStreaming?: boolean;
@@ -66,8 +68,8 @@ interface CollectAssistantWorkflowParams {
 	messages: WorkflowMessage[];
 	startIndex: number;
 	currentIsStreaming: boolean;
-	keepWorkflowExpandedUntilAssistantText: boolean;
 	runHasAssistantText: boolean;
+	fallbackStartedAt: number;
 	truncateText: (value: string, len: number) => string;
 }
 
@@ -149,11 +151,9 @@ function buildToolCallGroups(
 	return groups;
 }
 
-function isThinkingOnlyAssistantMessage(message: WorkflowMessage | undefined): boolean {
+function isThinkingAssistantMessage(message: WorkflowMessage | undefined): boolean {
 	if (!message || message.role !== "assistant") return false;
 	if (message.toolCalls.length > 0) return false;
-	if (message.text.trim().length > 0) return false;
-	if ((message.errorText ?? "").trim().length > 0) return false;
 	return Boolean((message.thinking ?? "").trim());
 }
 
@@ -161,13 +161,13 @@ export function collectAssistantWorkflow({
 	messages,
 	startIndex,
 	currentIsStreaming,
-	keepWorkflowExpandedUntilAssistantText,
 	runHasAssistantText,
+	fallbackStartedAt,
 	truncateText,
 }: CollectAssistantWorkflowParams): AssistantWorkflowCandidate | null {
 	const start = messages[startIndex];
 	if (!start || start.role !== "assistant") return null;
-	const startIsThinkingOnly = isThinkingOnlyAssistantMessage(start);
+	const startIsThinkingOnly = isThinkingAssistantMessage(start);
 	const startHasTools = start.toolCalls.length > 0;
 	if (!startIsThinkingOnly && !startHasTools) return null;
 
@@ -192,9 +192,13 @@ export function collectAssistantWorkflow({
 		}
 
 		if (!sawTools) {
-			if (hasThinking && !hasText && !hasError) {
+			if (hasThinking) {
 				grouped.push(candidate);
 				cursor += 1;
+				if (hasText || hasError) {
+					consumedFinalMessage = true;
+					break;
+				}
 				continue;
 			}
 			break;
@@ -218,18 +222,32 @@ export function collectAssistantWorkflow({
 
 	if (grouped.length === 0) return null;
 	const toolCalls = grouped.flatMap((entry) => entry.toolCalls);
+	const hasThinkingOnlyWorkflow = toolCalls.length === 0 &&
+		grouped.some((entry) => Boolean((entry.thinking ?? "").trim()));
 	const isProvisionalWorkflow =
-		toolCalls.length === 0 && currentIsStreaming && keepWorkflowExpandedUntilAssistantText && !runHasAssistantText;
-	if (toolCalls.length === 0 && !isProvisionalWorkflow) return null;
+		hasThinkingOnlyWorkflow &&
+		currentIsStreaming &&
+		!runHasAssistantText;
+	if (toolCalls.length === 0 && !hasThinkingOnlyWorkflow) return null;
 
-	const startedAt = toolCalls.reduce((min, toolCall) => {
+	const toolStartedAt = toolCalls.reduce((min, toolCall) => {
 		if (!toolCall.startedAt) return min;
 		return min === 0 ? toolCall.startedAt : Math.min(min, toolCall.startedAt);
 	}, 0);
-	const endedAt = toolCalls.reduce((max, toolCall) => {
+	const messageStartedAt = grouped.reduce((min, entry) => {
+		if (!entry.startedAt) return min;
+		return min === 0 ? entry.startedAt : Math.min(min, entry.startedAt);
+	}, 0);
+	const startedAt = toolStartedAt || messageStartedAt || Math.max(0, fallbackStartedAt);
+	const toolEndedAt = toolCalls.reduce((max, toolCall) => {
 		if (!toolCall.endedAt) return max;
 		return Math.max(max, toolCall.endedAt);
 	}, 0);
+	const messageEndedAt = grouped.reduce((max, entry) => {
+		if (!entry.endedAt) return max;
+		return Math.max(max, entry.endedAt);
+	}, 0);
+	const endedAt = toolEndedAt || messageEndedAt;
 	const thinkingParts = grouped
 		.map((entry) => normalizeThinkingText((entry.thinking ?? "").replace(/^\s+/, "")))
 		.filter(Boolean);
@@ -256,7 +274,7 @@ export function collectAssistantWorkflow({
 			thinkingText,
 			finalText,
 			errorText,
-			isStreaming: grouped.some((entry) => entry.isStreaming),
+				isStreaming: isProvisionalWorkflow || grouped.some((entry) => entry.isStreaming),
 			startedAt,
 			endedAt,
 			isTerminal: nextIndex >= messages.length,
@@ -265,14 +283,21 @@ export function collectAssistantWorkflow({
 	};
 }
 
+export function resolveWorkflowDurationMs(
+	startedAt: number,
+	endedAt: number,
+	running: boolean,
+	now: number,
+): number {
+	if (!Number.isFinite(startedAt) || startedAt <= 0) return 0;
+	const resolvedEnd = running ? now : Math.max(endedAt, startedAt);
+	return Math.max(0, resolvedEnd - startedAt);
+}
+
 export function resolveWorkflowExpansionState({
 	workflowId,
 	toolCalls,
-	isTerminal,
-	keepWorkflowExpandedUntilAssistantText,
-	runSawToolActivity,
 	expandedWorkflowIds,
-	collapsedAutoWorkflowIds,
 }: ResolveWorkflowExpansionStateParams): {
 	total: number;
 	running: number;
@@ -281,14 +306,12 @@ export function resolveWorkflowExpansionState({
 } {
 	const total = toolCalls.length;
 	const running = toolCalls.filter((toolCall) => toolCall.isRunning).length;
-	const manualExpanded = expandedWorkflowIds.has(workflowId);
-	const autoExpanded =
-		isTerminal && keepWorkflowExpandedUntilAssistantText && (running > 0 || runSawToolActivity || total === 0);
-	const expanded = (autoExpanded && !collapsedAutoWorkflowIds.has(workflowId)) || manualExpanded;
 	return {
 		total,
 		running,
-		autoExpanded,
-		expanded,
+		// Codex-style traces always enter the timeline as a compact row.
+		// Running state changes the status/timer, never the disclosure state.
+		autoExpanded: false,
+		expanded: expandedWorkflowIds.has(workflowId),
 	};
 }

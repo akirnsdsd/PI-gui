@@ -3,8 +3,13 @@
  */
 
 import { html, nothing, render } from "lit";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { t } from "../i18n/index.js";
 import { promptDialog } from "./app-dialog.js";
+import {
+	resolveInlineTitleKeyAction,
+	shouldRestoreInlineTitleRename,
+} from "./desktop-ui-behavior.js";
 
 export type ContentTabType = "session" | "file" | "terminal";
 
@@ -47,11 +52,18 @@ export class ContentTabs {
 	private onSelect: ((id: string) => void) | null = null;
 	private onClose: ((id: string) => void) | null = null;
 	private onRename: ((id: string, title: string) => void) | null = null;
+	private onTitleRename: ((title: string) => boolean | Promise<boolean>) | null = null;
 	private onOpenTerminal: (() => void) | null = null;
 	private onCreateTab: (() => void) | null = null;
 	private terminalActive = false;
 	private collapsed = false;
 	private currentTaskTitle = "";
+	private editingTaskTitle = false;
+	private taskTitleDraft = "";
+	private taskTitleComposing = false;
+	private taskTitleRenameGeneration = 0;
+	private alwaysOnTop = false;
+	private alwaysOnTopPending = false;
 
 	private globalDismissListenerActive = false;
 
@@ -105,6 +117,7 @@ export class ContentTabs {
 		this.loadTabColors();
 		this.loadTabLayout();
 		this.render();
+		void this.syncAlwaysOnTopState();
 	}
 
 	setTabs(tabs: MainContentTab[], activeId: string | null): void {
@@ -135,6 +148,11 @@ export class ContentTabs {
 		this.onRename = cb;
 	}
 
+	/** 当前任务标题的原地重命名回调；由 main.ts 负责持久化到会话。 */
+	setOnTitleRename(cb: (title: string) => boolean | Promise<boolean>): void {
+		this.onTitleRename = cb;
+	}
+
 	setOnOpenTerminal(cb: () => void): void {
 		this.onOpenTerminal = cb;
 	}
@@ -153,6 +171,9 @@ export class ContentTabs {
 		const normalized = title.trim();
 		if (this.currentTaskTitle === normalized) return;
 		this.currentTaskTitle = normalized;
+		if (!this.editingTaskTitle) {
+			this.taskTitleDraft = normalized;
+		}
 		this.render();
 	}
 
@@ -537,16 +558,138 @@ export class ContentTabs {
 		return html`<span class="content-tab-fork-badge" title=${t("panels.contentTabs.forkTab")} aria-hidden="true"><svg viewBox="0 0 16 16"><circle cx="4" cy="3.5" r="1.3"></circle><circle cx="12" cy="3.5" r="1.3"></circle><circle cx="8" cy="12.5" r="1.3"></circle><path d="M4 4.8v1.4a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V4.8"></path><path d="M8 8.2v3"></path></svg></span>`;
 	}
 
+	private async syncAlwaysOnTopState(): Promise<void> {
+		try {
+			this.alwaysOnTop = await getCurrentWindow().isAlwaysOnTop();
+			this.render();
+		} catch {
+			// Browser preview and runtimes without window permission keep the toggle off.
+		}
+	}
+
+	private async toggleAlwaysOnTop(): Promise<void> {
+		if (this.alwaysOnTopPending) return;
+		const next = !this.alwaysOnTop;
+		this.alwaysOnTopPending = true;
+		this.render();
+		try {
+			await getCurrentWindow().setAlwaysOnTop(next);
+			this.alwaysOnTop = await getCurrentWindow().isAlwaysOnTop();
+		} catch {
+			this.alwaysOnTop = !next;
+		} finally {
+			this.alwaysOnTopPending = false;
+			this.render();
+		}
+	}
+
+	private startTaskTitleEditing(): void {
+		if (!this.currentTaskTitle) return;
+		this.taskTitleDraft = this.currentTaskTitle;
+		this.editingTaskTitle = true;
+		this.taskTitleComposing = false;
+		this.render();
+		requestAnimationFrame(() => {
+			const input = this.container.querySelector<HTMLInputElement>(".content-task-title-input");
+			input?.focus();
+			input?.select();
+		});
+	}
+
+	private commitTaskTitleEditing(): void {
+		if (!this.editingTaskTitle) return;
+		const nextTitle = this.taskTitleDraft.trim();
+		const previousTitle = this.currentTaskTitle;
+		this.editingTaskTitle = false;
+		this.taskTitleComposing = false;
+		this.taskTitleDraft = nextTitle || previousTitle;
+		if (nextTitle && nextTitle !== previousTitle) {
+			const generation = ++this.taskTitleRenameGeneration;
+			this.currentTaskTitle = nextTitle;
+			const persistRename = this.onTitleRename;
+			if (persistRename) {
+				void Promise.resolve(persistRename(nextTitle))
+					.then((saved) => {
+						if (!shouldRestoreInlineTitleRename(saved, generation, this.taskTitleRenameGeneration)) return;
+						this.currentTaskTitle = previousTitle;
+						this.taskTitleDraft = previousTitle;
+						this.render();
+					})
+					.catch(() => {
+						if (!shouldRestoreInlineTitleRename(false, generation, this.taskTitleRenameGeneration)) return;
+						this.currentTaskTitle = previousTitle;
+						this.taskTitleDraft = previousTitle;
+						this.render();
+					});
+			}
+		}
+		this.render();
+	}
+
+	private cancelTaskTitleEditing(): void {
+		if (!this.editingTaskTitle) return;
+		this.editingTaskTitle = false;
+		this.taskTitleComposing = false;
+		this.taskTitleDraft = this.currentTaskTitle;
+		this.render();
+	}
+
 	private renderTaskHeader(): ReturnType<typeof html> {
 		return html`
-			<div class="content-task-header" data-tauri-drag-region title=${this.currentTaskTitle}>
+			<div
+				class="content-task-header ${this.editingTaskTitle ? "is-editing" : ""}"
+				data-tauri-drag-region
+				title=${this.editingTaskTitle ? nothing : t("panels.contentTabs.renameTaskHint")}
+				@dblclick=${(event: MouseEvent) => {
+					event.preventDefault();
+					event.stopPropagation();
+					this.startTaskTitleEditing();
+				}}
+			>
 				<span class="content-task-icon" aria-hidden="true" data-tauri-drag-region>
 					<svg viewBox="0 0 16 16">
 						<path d="M2.5 4.4h4l1.2 1.4h5.8v6.7h-11z"></path>
 						<path d="M2.5 5.8V3.5h3.7l1.2 1.3"></path>
 					</svg>
 				</span>
-				<span class="content-task-title" data-tauri-drag-region>${this.currentTaskTitle}</span>
+				${this.editingTaskTitle
+					? html`
+						<input
+							class="content-task-title-input"
+							.value=${this.taskTitleDraft}
+							aria-label=${t("panels.contentTabs.renameTask")}
+							@input=${(event: Event) => {
+								this.taskTitleDraft = (event.currentTarget as HTMLInputElement).value;
+							}}
+							@compositionstart=${() => {
+								this.taskTitleComposing = true;
+							}}
+							@compositionend=${() => {
+								this.taskTitleComposing = false;
+							}}
+							@keydown=${(event: KeyboardEvent) => {
+								const action = resolveInlineTitleKeyAction(
+									event.key,
+									event.isComposing,
+									this.taskTitleComposing,
+								);
+								if (action === "cancel") {
+									event.preventDefault();
+									event.stopPropagation();
+									this.cancelTaskTitleEditing();
+									return;
+								}
+								if (action !== "commit") return;
+								event.preventDefault();
+								event.stopPropagation();
+								this.commitTaskTitleEditing();
+							}}
+							@blur=${() => this.commitTaskTitleEditing()}
+							@click=${(event: Event) => event.stopPropagation()}
+							@dblclick=${(event: Event) => event.stopPropagation()}
+						/>
+					`
+					: html`<span class="content-task-title" data-tauri-drag-region>${this.currentTaskTitle}</span>`}
 			</div>
 		`;
 	}
@@ -640,8 +783,36 @@ export class ContentTabs {
 								: nothing}
 						</div>
 
-						<div class="content-tabs-trailing" data-tauri-drag-region>
+					`}
+
+				<div class="content-tabs-trailing ${this.collapsed ? "task-only" : ""}" data-tauri-drag-region>
+					<button
+						type="button"
+						class="content-tabs-always-on-top-btn ${this.alwaysOnTop ? "active" : ""}"
+						title=${this.alwaysOnTop
+							? t("panels.contentTabs.alwaysOnTopDisable")
+							: t("panels.contentTabs.alwaysOnTopEnable")}
+						aria-label=${this.alwaysOnTop
+							? t("panels.contentTabs.alwaysOnTopDisable")
+							: t("panels.contentTabs.alwaysOnTopEnable")}
+						aria-pressed=${this.alwaysOnTop ? "true" : "false"}
+						?disabled=${this.alwaysOnTopPending}
+						@click=${(event: Event) => {
+							event.stopPropagation();
+							void this.toggleAlwaysOnTop();
+						}}
+					>
+						<svg viewBox="0 0 16 16" aria-hidden="true">
+							<path d="M5 2.5h6"></path>
+							<path d="M6 2.5v3L4.2 8.1h7.6L10 5.5v-3"></path>
+							<path d="M8 8.1v5.4"></path>
+						</svg>
+					</button>
+					${this.collapsed
+						? nothing
+						: html`
 							<button
+								type="button"
 								class="content-tabs-terminal-btn ${this.terminalActive ? "active" : ""}"
 								title=${t("panels.contentTabs.openTerminal")}
 								@click=${(event: Event) => {
@@ -651,8 +822,8 @@ export class ContentTabs {
 							>
 								<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.2h10v9.6H3z"></path><path d="M5.1 6.2l1.9 1.8-1.9 1.8"></path><path d="M8.6 9.8h2.6"></path></svg>
 							</button>
-						</div>
-					`}
+						`}
+				</div>
 
 				${!this.collapsed && this.contextTabKey
 					? html`

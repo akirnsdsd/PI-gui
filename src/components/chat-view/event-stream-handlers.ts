@@ -23,6 +23,7 @@ interface MessageLike {
 	isStreaming?: boolean;
 	isThinkingStreaming?: boolean;
 	errorText?: string;
+	endedAt?: number;
 }
 
 interface EnsureStreamingAssistantMessageOptions {
@@ -261,6 +262,7 @@ export function handleMessageStreamEvent(
 				if (last?.role === "assistant") {
 					last.isStreaming = false;
 					last.isThinkingStreaming = false;
+					last.endedAt = last.endedAt ?? Date.now();
 					const turnError = context.extractAssistantMessageError(turnMessage);
 					if (turnError) {
 						last.errorText = turnError;
@@ -276,6 +278,7 @@ export function handleMessageStreamEvent(
 			if (last?.role === "assistant") {
 				last.isStreaming = false;
 				last.isThinkingStreaming = false;
+				last.endedAt = last.endedAt ?? Date.now();
 				const completed = event.message as Record<string, unknown> | undefined;
 				const completedError = context.extractAssistantMessageError(completed);
 				if (completedError) {
