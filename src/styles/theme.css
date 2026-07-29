@@ -1,0 +1,56 @@
+/*
+ * Semantic theme mapping.
+ *
+ * Codex desktop language: neutral monochrome surfaces, black/white accent,
+ * semantic hues reserved for state only. Primitive palette lives in
+ * tokens.css; Pi theme overlays can still remap these tokens at runtime.
+ */
+
+:root,
+:root.dark {
+	color-scheme: dark;
+
+	--color-bg-app: #181818;
+	--color-bg-elevated: #212121;
+	--color-bg-muted: #262626;
+	--color-bg-soft: #2e2e2e;
+	--color-bg-sidebar: #212121;
+	--color-bg-workspace-chrome: #1c1c1c;
+	--color-bg-workspace-chrome-soft: #242424;
+
+	--color-border-default: rgb(255 255 255 / 0.105);
+	--color-text-primary: #f5f5f5;
+	--color-text-secondary: #9a9aa3;
+	--color-text-tertiary: #6f7078;
+
+	--color-accent-primary: #f5f5f5;
+	--color-accent-soft: rgb(245 245 245 / 0.12);
+
+	--color-state-danger: #fa423e;
+	--color-state-success: #04b84c;
+	--color-state-warning: #fb6a22;
+}
+
+:root.light {
+	color-scheme: light;
+
+	--color-bg-app: #ffffff;
+	--color-bg-elevated: #ffffff;
+	--color-bg-muted: #f5f5f5;
+	--color-bg-soft: #f0f0f0;
+	--color-bg-sidebar: #f9f9f9;
+	--color-bg-workspace-chrome: #f9f9f9;
+	--color-bg-workspace-chrome-soft: #f0f0f0;
+
+	--color-border-default: rgb(13 13 13 / 0.11);
+	--color-text-primary: #0d0d0d;
+	--color-text-secondary: #5d5d5d;
+	--color-text-tertiary: #afafaf;
+
+	--color-accent-primary: #0d0d0d;
+	--color-accent-soft: rgb(13 13 13 / 0.08);
+
+	--color-state-danger: #fa423e;
+	--color-state-success: #04b84c;
+	--color-state-warning: #fb6a22;
+}
