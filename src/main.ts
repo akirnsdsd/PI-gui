@@ -37,6 +37,17 @@ import { isExtensionConfigIntent, normalizeExtensionCommandName } from "./extens
 import { ensureDesktopSdkCompatExtensionInstalled } from "./extensions/sdk-compat-extension.js";
 import { ensureSmartVoiceNotifyDesktopHostMode } from "./extensions/smart-voice-notify-config.js";
 import { t } from "./i18n/index.js";
+import {
+	isCurrentSessionRuntimeSettlement,
+	isSessionRuntimeLifecycleProtected,
+	reduceSessionRuntimeLifecycle,
+	resolveSessionRuntimeEventSource,
+	type SessionRuntimeLifecycleSignal,
+} from "./runtime/session-runtime-lifecycle.js";
+import {
+	clearMatchingSessionAttention,
+	setSessionAttention,
+} from "./runtime/session-attention.js";
 import "./styles/app.css";
 
 interface WorkspaceSessionTab {
@@ -93,6 +104,18 @@ interface SessionRuntime {
 	projectPath: string;
 	lastKnownSessionPath: string | null;
 	running: boolean;
+	/**
+	 * The session-level run has started but pi has not emitted the external
+	 * `agent_settled` boundary yet. UI streaming may already be false while
+	 * extension callbacks are still using this runtime's ctx.
+	 */
+	awaitingAgentSettled: boolean;
+	/** Monotonic task generation used to invalidate delayed settlement callbacks. */
+	runEpoch: number;
+	/** The single queued settlement callback for the current run, if any. */
+	pendingSettleTimer: ReturnType<typeof setTimeout> | null;
+	/** Config reload requested while this runtime was still protected by a run. */
+	restartAfterSettlement: boolean;
 	draftInitialized: boolean;
 	phase: "idle" | "starting" | "switching_session" | "creating_session" | "ready" | "failed";
 	lastError: string | null;
@@ -629,6 +652,10 @@ function getOrCreateRuntimeForTab(workspaceId: string, tabId: string, projectPat
 		projectPath,
 		lastKnownSessionPath: null,
 		running: false,
+		awaitingAgentSettled: false,
+		runEpoch: 0,
+		pendingSettleTimer: null,
+		restartAfterSettlement: false,
 		draftInitialized: false,
 		phase: "idle",
 		lastError: null,
@@ -645,6 +672,7 @@ function getOrCreateRuntimeForTab(workspaceId: string, tabId: string, projectPat
 			// bridge 的事件，首次 start 发生在激活之前，proxy 层监听会漏掉。
 			void runStartupCompatibilityCheck(runtime.bridge, event.discovery);
 		}
+		handleSessionRuntimeLifecycleEvent(runtime, event);
 		handleBackgroundRuntimeNotifyEvent(runtime.key, event);
 	});
 	sessionRuntimes.set(key, runtime);
@@ -683,9 +711,53 @@ function resolveRuntimeNotifyTarget(runtime: SessionRuntime): {
 	};
 }
 
+function applySessionRuntimeLifecycleSignal(
+	runtime: SessionRuntime,
+	signal: SessionRuntimeLifecycleSignal,
+): void {
+	const previousRunning = runtime.running;
+	const previousAwaiting = runtime.awaitingAgentSettled;
+	const next = reduceSessionRuntimeLifecycle(
+		{
+			uiRunning: previousRunning,
+			awaitingAgentSettled: previousAwaiting,
+		},
+		signal,
+	);
+	runtime.running = next.uiRunning;
+	runtime.awaitingAgentSettled = next.awaitingAgentSettled;
+	if (runtime.running && !previousRunning) {
+		extensionUiHandler?.primeNotificationPermission();
+	}
+	if (runtime.running !== previousRunning || runtime.awaitingAgentSettled !== previousAwaiting) {
+		syncRunningSessionIndicators();
+		ensureRunningSessionPoller();
+	}
+}
+
+function isSessionRuntimeProtected(runtime: SessionRuntime | null | undefined): boolean {
+	if (!runtime) return false;
+	return isSessionRuntimeLifecycleProtected(runtime.phase, {
+		uiRunning: runtime.running,
+		awaitingAgentSettled: runtime.awaitingAgentSettled,
+	});
+}
+
+function cancelPendingRuntimeSettlement(runtime: SessionRuntime): void {
+	if (runtime.pendingSettleTimer === null) return;
+	clearTimeout(runtime.pendingSettleTimer);
+	runtime.pendingSettleTimer = null;
+}
+
 function markRuntimeRunStarted(runtimeKey: string): void {
 	runtimeRunHadError.set(runtimeKey, false);
 	runtimeRunNotifyObserved.set(runtimeKey, false);
+	const runtime = sessionRuntimes.get(runtimeKey);
+	if (runtime) {
+		cancelPendingRuntimeSettlement(runtime);
+		runtime.runEpoch += 1;
+		applySessionRuntimeLifecycleSignal(runtime, { type: "agent_start" });
+	}
 }
 
 function markRuntimeRunErrored(runtimeKey: string): void {
@@ -754,6 +826,78 @@ function dispatchSyntheticRunEndNotify(runtime: SessionRuntime, source: "active"
 	void extensionUiHandler?.handleRequest(normalizedRequest);
 }
 
+function finalizeSessionRuntimeRun(runtime: SessionRuntime, runEpoch: number): void {
+	if (sessionRuntimes.get(runtime.key) !== runtime) return;
+	if (!isCurrentSessionRuntimeSettlement(runtime.runEpoch, runEpoch, runtime.awaitingAgentSettled)) return;
+	const source = resolveSessionRuntimeEventSource(runtime.key, activeSessionRuntimeKey);
+	// Resolve the outcome/notification target before releasing the lifecycle
+	// fence. Once released, tab reuse may attach this bridge to another session.
+	dispatchSyntheticRunEndNotify(runtime, source);
+	applySessionRuntimeLifecycleSignal(runtime, { type: "agent_settled" });
+	scheduleStaleRuntimeRestart(runtime);
+	flushPendingAuthConfigReload();
+}
+
+function terminalizeSessionRuntimeRun(runtime: SessionRuntime): void {
+	cancelPendingRuntimeSettlement(runtime);
+	runtime.runEpoch += 1;
+	if (!runtime.running && !runtime.awaitingAgentSettled) {
+		clearRuntimeRunState(runtime.key);
+		return;
+	}
+	markRuntimeRunErrored(runtime.key);
+	const source = resolveSessionRuntimeEventSource(runtime.key, activeSessionRuntimeKey);
+	// The old process and its extension ctx cannot resume after disconnect.
+	// Attribute the failure to the originating tab before releasing its fence.
+	dispatchSyntheticRunEndNotify(runtime, source);
+	applySessionRuntimeLifecycleSignal(runtime, { type: "terminal_failure" });
+	scheduleStaleRuntimeRestart(runtime);
+	flushPendingAuthConfigReload();
+}
+
+function handleSessionRuntimeLifecycleEvent(
+	runtime: SessionRuntime,
+	event: Record<string, unknown>,
+): void {
+	const type = typeof event.type === "string" ? event.type : "unknown";
+	if (type === "agent_start") {
+		markRuntimeRunStarted(runtime.key);
+		return;
+	}
+	if (type === "agent_end") {
+		applySessionRuntimeLifecycleSignal(runtime, { type: "agent_end" });
+		return;
+	}
+	if (type === "error") {
+		markRuntimeRunErrored(runtime.key);
+		return;
+	}
+	if (type === "agent_settled") {
+		if (!runtime.awaitingAgentSettled || runtime.pendingSettleTimer !== null) return;
+		// pi emits its external agent_settled only after awaiting every extension
+		// agent_settled callback. Keep the runtime protected through one browser
+		// task so queued extension-ui events from the same stdout turn route first.
+		const runEpoch = runtime.runEpoch;
+		runtime.pendingSettleTimer = setTimeout(() => {
+			runtime.pendingSettleTimer = null;
+			finalizeSessionRuntimeRun(runtime, runEpoch);
+		}, 0);
+		return;
+	}
+	if (type === "rpc_disconnected") {
+		terminalizeSessionRuntimeRun(runtime);
+		return;
+	}
+	if (type === "rpc_reconnected") {
+		// A reconnect starts a new pi process from the current on-disk config.
+		runtime.configRevision = runtimeConfigRevision;
+		return;
+	}
+	if (type === "rpc_reconnect_failed") {
+		terminalizeSessionRuntimeRun(runtime);
+	}
+}
+
 // ---------------------------------------------------------------------------
 // RUNTIME-03/04 配置 revision：配置保存即递增；过期 runtime 的处置分三类——
 //   1. warm 热备：立即淘汰（绝不收养旧配置进程）；
@@ -789,16 +933,42 @@ function evictStaleWarmRuntimes(): void {
 	}
 }
 
-/** 后台 runtime 配置已过期：agent_settled 后重启进程加载新配置，ensure 路径会恢复原会话附着。 */
-function restartStaleBackgroundRuntime(runtime: SessionRuntime): void {
-	if (runtime.key === activeSessionRuntimeKey) return;
+/** 配置已过期：只在 run fence 与 ensure 都落定后重启，恢复原会话附着。 */
+function scheduleStaleRuntimeRestart(runtime: SessionRuntime): void {
 	if (isWarmPoolRuntime(runtime)) return;
 	if (runtime.suspended || !runtime.bridge.isConnected) return;
-	if (runtime.configRevision >= runtimeConfigRevision) return;
-	if (runtime.ensureInFlight) return;
+	if (runtime.configRevision >= runtimeConfigRevision) {
+		runtime.restartAfterSettlement = false;
+		return;
+	}
+	if (isSessionRuntimeProtected(runtime)) {
+		runtime.restartAfterSettlement = true;
+		recordDebugTrace(
+			`config-stale:defer-protected runtime=${runtime.instanceId} rev=${runtime.configRevision} current=${runtimeConfigRevision}`,
+		);
+		return;
+	}
+	if (runtime.ensureInFlight) {
+		runtime.restartAfterSettlement = true;
+		const pendingEnsure = runtime.ensureInFlight;
+		void pendingEnsure
+			.catch(() => {
+				/* the caller owns the ensure error; still reevaluate deferred restart */
+			})
+			.finally(() => {
+				if (runtime.ensureInFlight === pendingEnsure) {
+					setTimeout(() => {
+						if (sessionRuntimes.get(runtime.key) !== runtime) return;
+						scheduleStaleRuntimeRestart(runtime);
+					}, 0);
+				}
+			});
+		return;
+	}
 	const workspace = workspaces.find((entry) => entry.id === runtime.workspaceId) ?? null;
 	const tab = workspace?.sessionTabs.find((entry) => entry.id === runtime.tabId) ?? null;
 	if (!workspace || !tab) return;
+	runtime.restartAfterSettlement = false;
 	recordDebugTrace(`config-stale:settled-restart runtime=${runtime.instanceId} rev=${runtime.configRevision} current=${runtimeConfigRevision}`);
 	void ensureRuntimeForSessionTab(workspace, tab, runtime.projectPath, false).catch((err) => {
 		recordDebugTrace(`config-stale:settled-restart-failed runtime=${runtime.instanceId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -811,22 +981,7 @@ function handleBackgroundRuntimeNotifyEvent(runtimeKey: string, event: Record<st
 	if (runtime.key === activeSessionRuntimeKey) return;
 
 	const type = typeof event.type === "string" ? event.type : "unknown";
-	if (type === "agent_start") {
-		markRuntimeRunStarted(runtime.key);
-		return;
-	}
-	if (type === "error") {
-		markRuntimeRunErrored(runtime.key);
-		return;
-	}
-	if (type === "agent_settled") {
-		setTimeout(() => {
-			dispatchSyntheticRunEndNotify(runtime, "background");
-		}, 0);
-		// RUNTIME-03：配置已变更的后台 runtime 在运行落定后重启进程，加载新配置。
-		restartStaleBackgroundRuntime(runtime);
-		return;
-	}
+	if (type === "agent_start" || type === "error" || type === "agent_settled") return;
 	if (type === "rpc_reconnect_failed") {
 		recordDebugTrace(`rpc:reconnect-failed source=background runtime=${runtime.instanceId}`);
 		return;
@@ -891,20 +1046,19 @@ function handleBackgroundRuntimeNotifyEvent(runtimeKey: string, event: Record<st
 
 function setRuntimeRunning(runtime: SessionRuntime | null, running: boolean, _options: { suppressNotify?: boolean } = {}): void {
 	if (!runtime) return;
-	const wasRunning = runtime.running;
-	if (wasRunning === running) return;
-	runtime.running = running;
-	if (running) {
-		extensionUiHandler?.primeNotificationPermission();
-	}
-	syncRunningSessionIndicators();
-	ensureRunningSessionPoller();
+	applySessionRuntimeLifecycleSignal(runtime, {
+		type: "streaming_state",
+		isStreaming: running,
+	});
 }
 
 function syncRunningSessionIndicators(): void {
 	const runningPaths: string[] = [];
 	for (const runtime of sessionRuntimes.values()) {
-		if (!runtime.running) continue;
+		// Keep the originating task active through the external agent_settled
+		// boundary. agent_end/isStreaming=false may arrive earlier while queued
+		// continuation or extension callbacks still belong to the run.
+		if (!runtime.awaitingAgentSettled) continue;
 		if (!runtime.lastKnownSessionPath) continue;
 		runningPaths.push(runtime.lastKnownSessionPath);
 	}
@@ -972,10 +1126,18 @@ async function pollBackgroundRuntimeState(): Promise<void> {
 function updateRuntimeFromState(runtime: SessionRuntime | null, state: RpcSessionState): void {
 	if (!runtime) return;
 	touchRuntime(runtime);
+	const previousSessionPath = normalizeSessionPath(runtime.lastKnownSessionPath);
 	if (state.sessionFile) {
 		runtime.lastKnownSessionPath = state.sessionFile;
 	}
 	setRuntimeRunning(runtime, Boolean(state.isStreaming));
+	const nextSessionPath = normalizeSessionPath(runtime.lastKnownSessionPath);
+	if (runtime.running && nextSessionPath && nextSessionPath !== previousSessionPath) {
+		// Fresh sessions start streaming before pi assigns their session file.
+		// Once the path arrives, republish the running set even though the
+		// boolean running state itself did not change.
+		syncRunningSessionIndicators();
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,7 +1183,7 @@ function ensureRuntimeSupervisor(): void {
 
 async function suspendRuntime(runtime: SessionRuntime, reason: string): Promise<boolean> {
 	if (runtime.suspended) return false;
-	if (runtime.running) return false;
+	if (isSessionRuntimeProtected(runtime)) return false;
 	if (runtime.key === activeSessionRuntimeKey) return false;
 	runtime.suspended = true;
 	runtime.phase = "idle";
@@ -1044,7 +1206,7 @@ async function enforceRuntimeConcurrencyLimit(excludeKey: string): Promise<void>
 	);
 	while (connected.length >= maxRunningRuntimes) {
 		const victim = connected
-			.filter((runtime) => !runtime.running && runtime.key !== activeSessionRuntimeKey)
+			.filter((runtime) => !isSessionRuntimeProtected(runtime) && runtime.key !== activeSessionRuntimeKey)
 			.sort((a, b) => a.lastActivityAt - b.lastActivityAt)[0];
 		if (!victim) return;
 		const suspended = await suspendRuntime(victim, "concurrency-limit");
@@ -1057,7 +1219,7 @@ async function scanIdleRuntimes(): Promise<void> {
 	const idleMs = runtimeIdleTimeoutMinutes * 60_000;
 	const now = Date.now();
 	for (const runtime of sessionRuntimes.values()) {
-		if (runtime.suspended || runtime.running) continue;
+		if (runtime.suspended || isSessionRuntimeProtected(runtime)) continue;
 		if (runtime.key === activeSessionRuntimeKey) continue;
 		if (!runtime.bridge.isConnected) continue;
 		if (now - runtime.lastActivityAt < idleMs) continue;
@@ -1153,12 +1315,14 @@ function removeRuntimeByKey(runtimeKey: string): Promise<void> | null {
 	if (!runtime) return null;
 	runtime.eventUnlisten?.();
 	runtime.eventUnlisten = null;
+	cancelPendingRuntimeSettlement(runtime);
+	runtime.runEpoch += 1;
+	applySessionRuntimeLifecycleSignal(runtime, { type: "terminal_failure" });
 	sessionRuntimes.delete(runtimeKey);
 	clearRuntimeRunState(runtimeKey);
 	if (activeSessionRuntimeKey === runtimeKey) {
 		setActiveRuntime(null);
 	}
-	setRuntimeRunning(runtime, false, { suppressNotify: true });
 	runtime.phase = "idle";
 	syncDebugOverlay();
 	return trackRuntimeStop(runtime);
@@ -1496,20 +1660,12 @@ function getActiveSessionTab(workspace: WorkspaceState): WorkspaceSessionTab {
 
 function isSessionTabRuntimeRunning(workspaceId: string, tabId: string): boolean {
 	const runtime = getRuntimeForTab(workspaceId, tabId);
-	if (!runtime) return false;
-	if (runtime.running) return true;
-	if (runtime.phase === "starting" || runtime.phase === "switching_session" || runtime.phase === "creating_session") {
-		return true;
-	}
-	return false;
+	return isSessionRuntimeProtected(runtime);
 }
 
 function clearSessionAttention(tab: WorkspaceSessionTab | null | undefined): boolean {
 	if (!tab) return false;
-	if (!tab.needsAttention && !tab.attentionMessage) return false;
-	tab.needsAttention = false;
-	tab.attentionMessage = null;
-	return true;
+	return setSessionAttention(tab, false);
 }
 
 function markSessionAttentionTarget(target: {
@@ -1546,8 +1702,7 @@ function markSessionAttentionTarget(target: {
 		return;
 	}
 
-	tab.needsAttention = true;
-	tab.attentionMessage = pickSessionAttentionMessage(tab.attentionMessage);
+	setSessionAttention(tab, true, pickSessionAttentionMessage(tab.attentionMessage));
 	recordDebugTrace(`notify-attention:set workspace=${workspace.id} tab=${tab.id} message=${tab.attentionMessage}`);
 	persistWorkspaces();
 	if (activeWorkspaceId === workspace.id) {
@@ -2355,7 +2510,7 @@ async function refreshDesktopStateAfterAuthChangeWithoutProject(): Promise<void>
 }
 
 function isActiveRuntimeStreamingForAuthReload(): boolean {
-	if (getActiveRuntime()?.running) return true;
+	if (isSessionRuntimeProtected(getActiveRuntime())) return true;
 	return Boolean(chatView?.getState()?.isStreaming);
 }
 
@@ -3478,6 +3633,10 @@ function createWarmRuntime(projectPath: string): SessionRuntime {
 		projectPath,
 		lastKnownSessionPath: null,
 		running: false,
+		awaitingAgentSettled: false,
+		runEpoch: 0,
+		pendingSettleTimer: null,
+		restartAfterSettlement: false,
 		draftInitialized: false,
 		phase: "idle",
 		lastError: null,
@@ -3493,6 +3652,7 @@ function createWarmRuntime(projectPath: string): SessionRuntime {
 			// 同 getOrCreateRuntimeForTab：热备进程的 rpc_connected 同样触发兼容性检查。
 			void runStartupCompatibilityCheck(runtime.bridge, event.discovery);
 		}
+		handleSessionRuntimeLifecycleEvent(runtime, event);
 		handleBackgroundRuntimeNotifyEvent(runtime.key, event);
 	});
 	sessionRuntimes.set(key, runtime);
@@ -3577,6 +3737,7 @@ function adoptWarmRuntimeBridge(runtime: SessionRuntime, warm: SessionRuntime): 
 	runtime.configRevision = warm.configRevision;
 	runtime.eventUnlisten = runtime.bridge.onEvent((event) => {
 		touchRuntime(runtime);
+		handleSessionRuntimeLifecycleEvent(runtime, event);
 		handleBackgroundRuntimeNotifyEvent(runtime.key, event);
 	});
 }
@@ -3640,20 +3801,31 @@ async function runEnsureRuntimeForSessionTab(
 	const resumeSessionPath = sessionTab.sessionPath ?? (runtime.suspended ? runtime.lastKnownSessionPath : null);
 
 	const projectChanged = normalizeProjectPath(runtime.projectPath) !== normalizeProjectPath(projectPath);
+	const configStale = bridge.isConnected && runtime.configRevision < runtimeConfigRevision;
+	const replacementProtected = (projectChanged || configStale) && isSessionRuntimeProtected(runtime);
+	if (projectChanged && replacementProtected) {
+		throw new Error("当前线程仍在后台运行，不能把它的 runtime 切换到另一个项目");
+	}
 	runtime.projectPath = projectPath;
 	runtime.lastError = null;
 	// RUNTIME-03：已连接但配置 revision 过期的 runtime，激活前重启加载新配置。
-	const configStale = bridge.isConnected && runtime.configRevision < runtimeConfigRevision;
+	if (configStale && replacementProtected) {
+		runtime.restartAfterSettlement = true;
+		recordDebugTrace(
+			`ensureRuntime:config-stale-deferred instance=${runtime.instanceId} rev=${runtime.configRevision} current=${runtimeConfigRevision}`,
+		);
+	}
 	recordDebugTrace(
 		`ensureRuntime:start workspace=${workspace.id} tab=${sessionTab.id} project=${projectPath} session=${sessionTab.sessionPath ?? "draft"}`,
 	);
 
 	try {
-		if ((projectChanged || configStale) && bridge.isConnected) {
+		if ((projectChanged || configStale) && bridge.isConnected && !replacementProtected) {
 			runtime.phase = "starting";
 			if (configStale && !projectChanged) {
 				recordDebugTrace(`ensureRuntime:config-stale-restart instance=${runtime.instanceId} rev=${runtime.configRevision} current=${runtimeConfigRevision}`);
 			}
+			runtime.restartAfterSettlement = false;
 			await bridge.stop().catch(() => {
 				/* ignore */
 			});
@@ -3728,6 +3900,9 @@ async function runEnsureRuntimeForSessionTab(
 		if (resumeSessionPath) {
 			const targetSessionPath = resumeSessionPath;
 			if (normalizeSessionPath(targetSessionPath) !== normalizeSessionPath(runtime.lastKnownSessionPath)) {
+				if (isSessionRuntimeProtected(runtime)) {
+					throw new Error("当前线程仍在后台运行，不能切换它所附着的会话");
+				}
 				runtime.phase = "switching_session";
 				const switchStartedAt = Date.now();
 				const switched = await withRpcRetry(
@@ -3770,24 +3945,9 @@ async function runEnsureRuntimeForSessionTab(
 		);
 		if (runtime.configRevision < runtimeConfigRevision) {
 			// 启动期间配置又 bump 过：进程实际加载的是旧配置，打戳保持旧 rev（stale），
-			// 完成启动后立即按 stale 链路重启加载新配置（等 ensureInFlight 清空后再触发）。
+			// 完成启动后按 stale 链路重启；若 run/ensure 尚未落定则继续延迟。
 			recordDebugTrace(`config-stale:after-start instance=${runtime.instanceId} rev=${runtime.configRevision} current=${runtimeConfigRevision}`);
-			setTimeout(() => {
-				if (sessionRuntimes.get(runtime.key) !== runtime) return;
-				if (runtime.configRevision >= runtimeConfigRevision) return;
-				if (!workspace.sessionTabs.some((entry) => entry.id === sessionTab.id)) return;
-				if (runtime.key === activeSessionRuntimeKey) {
-					// restartStaleBackgroundRuntime 只处理后台 runtime（跳过 active），
-					// 但启动期间配置变过必须立即重启：直接重走 ensure 链路，
-					// 其 configStale 分支会先停进程，再用新配置冷启动并重新附着会话。
-					recordDebugTrace(`config-stale:active-restart instance=${runtime.instanceId} rev=${runtime.configRevision} current=${runtimeConfigRevision}`);
-					void ensureRuntimeForSessionTab(workspace, sessionTab, projectPath, false).catch((err) => {
-						recordDebugTrace(`config-stale:active-restart-failed instance=${runtime.instanceId}: ${err instanceof Error ? err.message : String(err)}`);
-					});
-					return;
-				}
-				restartStaleBackgroundRuntime(runtime);
-			}, 0);
+			scheduleStaleRuntimeRestart(runtime);
 		}
 		// 用掉/错过热备后补齐一个（仅活跃项目；并发名额满时自动跳过）。
 		const activeProjectPath = getWorkspaceActiveProjectPath(workspace);
@@ -4616,10 +4776,13 @@ async function initialize(): Promise<void> {
 		chatView.setOnRunStateChange((running) => {
 			const runtime = getActiveRuntime();
 			if (runtime) {
-				setRuntimeRunning(runtime, running);
 				const currentSessionPath = chatView?.getState()?.sessionFile ?? runtime.lastKnownSessionPath;
 				if (currentSessionPath) {
 					runtime.lastKnownSessionPath = currentSessionPath;
+				}
+				setRuntimeRunning(runtime, running);
+				if (running && currentSessionPath) {
+					syncRunningSessionIndicators();
 				}
 			}
 			if (running) {
@@ -4759,16 +4922,29 @@ function initializeComponents(): void {
 	sessionBrowserContainer.id = "session-browser-container";
 	document.body.appendChild(sessionBrowserContainer);
 	sessionBrowser = new SessionBrowser(sessionBrowserContainer);
-	sessionBrowser.setOnSessionSelected(async () => {
-		const workspace = getActiveWorkspace();
-		if (workspace) {
-			workspace.pane = "chat";
-			persistWorkspaces();
+	sessionBrowser.setOnSessionSelected(async (selection) => {
+		if (selection.kind === "new") {
+			await startFreshSessionTab();
+			return;
 		}
-		await chatView?.refreshFromBackend({ throwOnError: true });
-		await applyWorkspacePane(workspace ?? null);
+		const workspace = getActiveWorkspace();
+		if (!workspace) return;
+		const project =
+			sidebar?.getProjectByPath(selection.cwd) ??
+			sidebar?.getProjectById(getWorkspaceActiveProjectId(workspace));
+		if (!project) {
+			chatView?.notify(t("app.sessions.addProjectFirst"), "info");
+			return;
+		}
+		await activateProjectSession(
+			project.id,
+			selection.path,
+			selection.name ?? undefined,
+			{ label: "session-browser-select" },
+		);
 	});
-	sessionBrowser.setOnForkText((text) => {
+	sessionBrowser.setOnForkText(async (text) => {
+		await chatView?.refreshFromBackend({ throwOnError: true });
 		chatView?.setInputText(text);
 	});
 
@@ -4857,17 +5033,6 @@ function initializeComponents(): void {
 		}
 
 		const runtime = getActiveRuntime();
-		if (runtime) {
-			if (type === "agent_start") {
-				markRuntimeRunStarted(runtime.key);
-			} else if (type === "error") {
-				markRuntimeRunErrored(runtime.key);
-			} else if (type === "agent_settled") {
-				setTimeout(() => {
-					dispatchSyntheticRunEndNotify(runtime, "active");
-				}, 0);
-			}
-		}
 
 		if (type === "extension_ui_request") {
 			const method = typeof event.method === "string" ? event.method : "unknown";
@@ -4951,6 +5116,67 @@ function toggleTerminalDock(forceOpen?: boolean): void {
 	persistWorkspaces();
 	syncWorkspaceTabsBar();
 	void applyWorkspacePane(workspace);
+}
+
+function activateProjectSession(
+	projectId: string,
+	sessionPath: string,
+	sessionName?: string,
+	options?: {
+		label?: string;
+		onActivated?: () => void | Promise<void>;
+		onFailed?: (err: unknown) => void;
+	},
+): Promise<void> {
+	const workspace = getActiveWorkspace();
+	const project = sidebar?.getProjectById(projectId);
+	if (!workspace || !project) return Promise.resolve();
+
+	const autoTabCountBefore = getVisibleContentTabCount(workspace);
+	const canAutoCreateTab = autoTabCountBefore < DEFAULT_AUTO_CONTENT_TAB_LIMIT;
+	setWorkspaceActiveProject(workspace, project);
+
+	const sessionTab = openOrActivateSessionTab(
+		workspace,
+		sessionPath,
+		project.id,
+		project.path,
+		sessionName,
+		{
+			allowCreateTab: canAutoCreateTab,
+		},
+	);
+	pruneInactiveEphemeralSessionTabs(workspace, [sessionTab.id]);
+	persistWorkspaces();
+	syncWorkspaceTabsBar();
+	syncContentTabsBar(workspace);
+	syncActiveChatRuntimeBinding(workspace, {
+		forceReset: true,
+		statusText: t("app.status.loadingSession"),
+	});
+	void applyWorkspacePane(workspace);
+
+	return queueProjectTask(
+		async (version) => {
+			await ensureRuntimeForSessionTab(workspace, sessionTab, project.path, true, version);
+			assertProjectTaskCurrent(version);
+			await Promise.all([
+				chatView?.refreshFromBackend({ throwOnError: true }),
+				chatView?.refreshModels(),
+			]);
+			assertProjectTaskCurrent(version);
+			await applyWorkspacePane(workspace);
+			if (options?.onActivated) {
+				await options.onActivated();
+			}
+		},
+		(err) => {
+			console.error("Failed to switch session:", err);
+			chatView?.notify(t("app.errors.switchSession"), "error");
+			options?.onFailed?.(err);
+		},
+		{ label: options?.label ?? "session-select" },
+	);
 }
 
 async function startFreshSessionTab(options: { forceNewTab?: boolean; title?: string } = {}): Promise<void> {
@@ -5824,6 +6050,22 @@ function renderApp(): void {
 		void recordAutoImportExclusion(project.path);
 	});
 
+	sidebar.setOnProjectMarkRead((project) => {
+		const workspace = getActiveWorkspace();
+		if (!workspace) return;
+		ensureWorkspaceContentState(workspace);
+		const changed = clearMatchingSessionAttention(
+			workspace.sessionTabs,
+			(tab) =>
+				tab.projectId === project.id ||
+				normalizeProjectPath(tab.projectPath) === normalizeProjectPath(project.path),
+		);
+		if (!changed) return;
+		persistWorkspaces();
+		syncContentTabsBar(workspace);
+		syncSidebarSelectionFromWorkspace(workspace);
+	});
+
 	sidebar.setOnProjectSelect((project) => {
 		const workspace = getActiveWorkspace();
 		if (!workspace) return;
@@ -6008,58 +6250,13 @@ function renderApp(): void {
 		prewarmSessionRuntime(projectId, sessionPath);
 	});
 
-	const activateSidebarSession = (
-		projectId: string,
-		sessionPath: string,
-		sessionName?: string,
-		options?: { label?: string; onActivated?: () => void | Promise<void>; onFailed?: (err: unknown) => void },
-	): void => {
-		const workspace = getActiveWorkspace();
-		const project = sidebar?.getProjectById(projectId);
-		if (!workspace || !project) return;
-
-		const autoTabCountBefore = getVisibleContentTabCount(workspace);
-		const canAutoCreateTab = autoTabCountBefore < DEFAULT_AUTO_CONTENT_TAB_LIMIT;
-		setWorkspaceActiveProject(workspace, project);
-
-		const sessionTab = openOrActivateSessionTab(workspace, sessionPath, project.id, project.path, sessionName, {
-			allowCreateTab: canAutoCreateTab,
-		});
-		pruneInactiveEphemeralSessionTabs(workspace, [sessionTab.id]);
-		persistWorkspaces();
-		syncWorkspaceTabsBar();
-		syncContentTabsBar(workspace);
-		syncActiveChatRuntimeBinding(workspace, { forceReset: true, statusText: t("app.status.loadingSession") });
-		void applyWorkspacePane(workspace);
-
-		void queueProjectTask(
-			async (version) => {
-				await ensureRuntimeForSessionTab(workspace, sessionTab, project.path, true, version);
-				assertProjectTaskCurrent(version);
-				// 状态刷新与模型目录加载并行，缩短首屏等待。
-				await Promise.all([chatView?.refreshFromBackend({ throwOnError: true }), chatView?.refreshModels()]);
-				assertProjectTaskCurrent(version);
-				await applyWorkspacePane(workspace);
-				if (options?.onActivated) {
-					await options.onActivated();
-				}
-			},
-			(err) => {
-				console.error("Failed to switch session:", err);
-				chatView?.notify(t("app.errors.switchSession"), "error");
-				options?.onFailed?.(err);
-			},
-			{ label: options?.label ?? "sidebar-session-select" },
-		);
-	};
-
 	sidebar.setOnSessionSelect((projectId, sessionPath, sessionName) => {
-		activateSidebarSession(projectId, sessionPath, sessionName, { label: "sidebar-session-select" });
+		void activateProjectSession(projectId, sessionPath, sessionName, { label: "sidebar-session-select" });
 	});
 
 	sidebar.setOnSessionFork((projectId, sessionPath, sessionName) => {
 		chatView?.openHistoryViewerForFork({ loading: true, sessionName });
-		activateSidebarSession(projectId, sessionPath, sessionName, {
+		void activateProjectSession(projectId, sessionPath, sessionName, {
 			label: "sidebar-session-fork",
 			onActivated: () => {
 				chatView?.openHistoryViewerForFork({ loading: false, sessionName });
@@ -6080,8 +6277,7 @@ function renderApp(): void {
 			chatView?.notify(t("app.sessions.openBeforeMarkUnread"), "info");
 			return;
 		}
-		targetTab.needsAttention = true;
-		targetTab.attentionMessage = pickSessionAttentionMessage(targetTab.attentionMessage);
+		setSessionAttention(targetTab, true, pickSessionAttentionMessage(targetTab.attentionMessage));
 		persistWorkspaces();
 		syncContentTabsBar(workspace);
 		syncSidebarSelectionFromWorkspace(workspace);

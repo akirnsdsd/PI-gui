@@ -7,6 +7,7 @@ import {
 } from "./workflow-utils.js";
 import {
 	resolveInlineTitleKeyAction,
+	resolveModelPickerSubmenuPlacement,
 	resolveSessionRefreshScrollAction,
 	resolveViewportPopoverLeft,
 	shouldRollbackSessionTitle,
@@ -14,6 +15,18 @@ import {
 	toggleCompactSidebarOverlay,
 } from "../desktop-ui-behavior.js";
 import { formatPendingFileDisplayName } from "./composer-fragments-view.js";
+import { resolveSidebarSessionStatus } from "../sidebar-session-status.js";
+import {
+	INITIAL_SESSION_RUNTIME_LIFECYCLE,
+	isCurrentSessionRuntimeSettlement,
+	isSessionRuntimeLifecycleProtected,
+	reduceSessionRuntimeLifecycle,
+	resolveSessionRuntimeEventSource,
+} from "../../runtime/session-runtime-lifecycle.js";
+import {
+	clearMatchingSessionAttention,
+	setSessionAttention,
+} from "../../runtime/session-attention.js";
 
 let passed = 0;
 let failed = 0;
@@ -187,6 +200,323 @@ const runningTool: WorkflowToolCall = {
 	check("wide sidebar click does not create overlay state", toggleCompactSidebarOverlay(false, true) === false);
 	check("compact model picker stays inside left viewport edge", resolveViewportPopoverLeft(318, 404, 420) === 8);
 	check("wide model picker preserves right anchoring", resolveViewportPopoverLeft(900, 470, 1100) === 430);
+}
+
+{
+	const aligned = resolveModelPickerSubmenuPlacement({
+		preferredPopoverLeft: 400,
+		popoverWidth: 204,
+		popoverTop: 200,
+		anchorTop: 270,
+		submenuWidth: 204,
+		submenuHeight: 180,
+		contentLeft: 8,
+		contentRight: 1192,
+		contentBottom: 900,
+		gap: 3,
+	});
+	check(
+		"model submenu aligns with the hovered provider row",
+		aligned.top === 70 &&
+			aligned.side === "right" &&
+			aligned.popoverLeft === 400 &&
+			aligned.submenuLeft === 607,
+		aligned,
+	);
+
+	const moved = resolveModelPickerSubmenuPlacement({
+		preferredPopoverLeft: 400,
+		popoverWidth: 204,
+		popoverTop: 200,
+		anchorTop: 302,
+		submenuWidth: 204,
+		submenuHeight: 180,
+		contentLeft: 8,
+		contentRight: 1192,
+		contentBottom: 900,
+		gap: 3,
+	});
+	check("hovering another provider moves the submenu to that row", moved.top === 102, moved);
+
+	const flipped = resolveModelPickerSubmenuPlacement({
+		preferredPopoverLeft: 550,
+		popoverWidth: 204,
+		popoverTop: 200,
+		anchorTop: 228,
+		submenuWidth: 204,
+		submenuHeight: 180,
+		contentLeft: 8,
+		contentRight: 760,
+		contentBottom: 900,
+		gap: 3,
+	});
+	check(
+		"model submenu flips left when the right side does not fit",
+		flipped.side === "left" &&
+			flipped.popoverLeft === 550 &&
+			flipped.submenuLeft === 343 &&
+			flipped.top === 28,
+		flipped,
+	);
+
+	const exactRight = resolveModelPickerSubmenuPlacement({
+		preferredPopoverLeft: 345,
+		popoverWidth: 204,
+		popoverTop: 100,
+		anchorTop: 100,
+		submenuWidth: 204,
+		submenuHeight: 180,
+		contentLeft: 8,
+		contentRight: 756,
+		contentBottom: 900,
+		gap: 3,
+	});
+	check(
+		"model submenu keeps the preferred right side at the exact boundary",
+		exactRight.side === "right" &&
+			exactRight.popoverLeft === 345 &&
+			exactRight.submenuLeft === 552,
+		exactRight,
+	);
+
+	const narrow = resolveModelPickerSubmenuPlacement({
+		preferredPopoverLeft: 180,
+		popoverWidth: 168,
+		popoverTop: 140,
+		anchorTop: 196,
+		submenuWidth: 176,
+		submenuHeight: 180,
+		contentLeft: 8,
+		contentRight: 412,
+		contentBottom: 400,
+		gap: 2,
+	});
+	check(
+		"narrow model menus shift together without overlap",
+		narrow.popoverLeft >= 8 &&
+			narrow.submenuLeft >= narrow.popoverLeft + 168 + 2 &&
+			narrow.submenuLeft + narrow.submenuWidth <= 412 &&
+			narrow.top === 56,
+		narrow,
+	);
+
+	const visibleChatBounds = resolveModelPickerSubmenuPlacement({
+		preferredPopoverLeft: 350,
+		popoverWidth: 204,
+		popoverTop: 180,
+		anchorTop: 276,
+		submenuWidth: 204,
+		submenuHeight: 180,
+		contentLeft: 330,
+		contentRight: 900,
+		contentBottom: 720,
+		gap: 3,
+	});
+	check(
+		"model menu pair stays inside the current chat content bounds",
+		visibleChatBounds.popoverLeft >= 330 &&
+			visibleChatBounds.submenuLeft === visibleChatBounds.popoverLeft + 207 &&
+			visibleChatBounds.submenuLeft + visibleChatBounds.submenuWidth <= 900 &&
+			visibleChatBounds.top === 96,
+		visibleChatBounds,
+	);
+
+	const lowerRow = resolveModelPickerSubmenuPlacement({
+		preferredPopoverLeft: 400,
+		popoverWidth: 204,
+		popoverTop: 600,
+		anchorTop: 790,
+		submenuWidth: 204,
+		submenuHeight: 244,
+		contentLeft: 8,
+		contentRight: 1192,
+		contentBottom: 850,
+		gap: 3,
+	});
+	check(
+		"lower provider row keeps alignment and limits submenu height",
+		lowerRow.top === 190 && lowerRow.submenuMaxHeight === 60,
+		lowerRow,
+	);
+
+	const nearlyBlockedByComposer = resolveModelPickerSubmenuPlacement({
+		preferredPopoverLeft: 400,
+		popoverWidth: 204,
+		popoverTop: 620,
+		anchorTop: 810,
+		submenuWidth: 204,
+		submenuHeight: 244,
+		contentLeft: 8,
+		contentRight: 1192,
+		contentBottom: 820,
+		gap: 3,
+	});
+	check(
+		"model submenu never exceeds the space above the composer",
+		nearlyBlockedByComposer.submenuMaxHeight === 10,
+		nearlyBlockedByComposer,
+	);
+}
+
+{
+	check(
+		"sidebar running state replaces unread attention",
+		resolveSidebarSessionStatus(true, false, true) === "running",
+	);
+	check(
+		"sidebar unread attention remains visible after runtime suspension",
+		resolveSidebarSessionStatus(false, true, true) === "unread",
+	);
+	check(
+		"read settled session has no permanent completion marker",
+		resolveSidebarSessionStatus(false, false, false) === null,
+	);
+	check(
+		"sidebar suspension is only the idle fallback",
+		resolveSidebarSessionStatus(false, true, false) === "suspended",
+	);
+}
+
+{
+	const tabs = [
+		{ id: "a", projectId: "project-a", needsAttention: false, attentionMessage: null as string | null },
+		{ id: "b", projectId: "project-b", needsAttention: false, attentionMessage: null as string | null },
+	];
+	setSessionAttention(tabs[0]!, true, "任务已完成");
+	check(
+		"background session completion marks only the originating session unread",
+		tabs[0]?.needsAttention === true &&
+			tabs[0]?.attentionMessage === "任务已完成" &&
+			tabs[1]?.needsAttention === false,
+		tabs,
+	);
+	setSessionAttention(tabs[0]!, false);
+	check(
+		"opening the completed session clears its unread marker",
+		tabs.every((tab) => !tab.needsAttention && tab.attentionMessage === null),
+		tabs,
+	);
+	setSessionAttention(tabs[0]!, true, "A");
+	setSessionAttention(tabs[1]!, true, "B");
+	const projectCleared = clearMatchingSessionAttention(
+		tabs,
+		(tab) => tab.projectId === "project-a",
+	);
+	check(
+		"marking one project read preserves unread sessions in other projects",
+		projectCleared &&
+			tabs[0]?.needsAttention === false &&
+			tabs[1]?.needsAttention === true &&
+			tabs[1]?.attentionMessage === "B",
+		tabs,
+	);
+}
+
+{
+	const started = reduceSessionRuntimeLifecycle(INITIAL_SESSION_RUNTIME_LIFECYCLE, { type: "agent_start" });
+	check(
+		"agent start enables UI running and protects the session runtime",
+		started.uiRunning &&
+			started.awaitingAgentSettled &&
+			isSessionRuntimeLifecycleProtected("ready", started),
+		started,
+	);
+
+	const ended = reduceSessionRuntimeLifecycle(started, { type: "agent_end" });
+	check(
+		"agent end stops UI running but keeps the runtime protected until settled",
+		!ended.uiRunning &&
+			ended.awaitingAgentSettled &&
+			isSessionRuntimeLifecycleProtected("ready", ended),
+		ended,
+	);
+
+	const pollStarted = reduceSessionRuntimeLifecycle(INITIAL_SESSION_RUNTIME_LIFECYCLE, {
+		type: "streaming_state",
+		isStreaming: true,
+	});
+	const pollStopped = reduceSessionRuntimeLifecycle(pollStarted, {
+		type: "streaming_state",
+		isStreaming: false,
+	});
+	check(
+		"polling streaming false stops UI running but does not release protection",
+		!pollStopped.uiRunning &&
+			pollStopped.awaitingAgentSettled &&
+			isSessionRuntimeLifecycleProtected("ready", pollStopped),
+		pollStopped,
+	);
+
+	const settled = reduceSessionRuntimeLifecycle(ended, { type: "agent_settled" });
+	check(
+		"agent settled releases the runtime for reuse",
+		!settled.uiRunning &&
+			!settled.awaitingAgentSettled &&
+			!isSessionRuntimeLifecycleProtected("ready", settled),
+		settled,
+	);
+
+	const failed = reduceSessionRuntimeLifecycle(started, { type: "terminal_failure" });
+	check(
+		"terminal failure releases the runtime protection",
+		!failed.uiRunning &&
+			!failed.awaitingAgentSettled &&
+			!isSessionRuntimeLifecycleProtected("failed", failed),
+		failed,
+	);
+
+	check(
+		"session replacement phases stay protected without an active run",
+		isSessionRuntimeLifecycleProtected("starting", INITIAL_SESSION_RUNTIME_LIFECYCLE) &&
+			isSessionRuntimeLifecycleProtected("switching_session", INITIAL_SESSION_RUNTIME_LIFECYCLE) &&
+			isSessionRuntimeLifecycleProtected("creating_session", INITIAL_SESSION_RUNTIME_LIFECYCLE),
+	);
+	check(
+		"settled event remains owned by its original runtime after switching threads",
+		resolveSessionRuntimeEventSource("runtime-a", "runtime-b") === "background" &&
+			resolveSessionRuntimeEventSource("runtime-b", "runtime-b") === "active",
+	);
+
+	const scheduledEpoch = 4;
+	check(
+		"current run settlement is accepted exactly while its fence is active",
+		isCurrentSessionRuntimeSettlement(4, scheduledEpoch, true),
+	);
+	check(
+		"duplicate settlement is rejected after the fence has already released",
+		!isCurrentSessionRuntimeSettlement(4, scheduledEpoch, false),
+	);
+	check(
+		"delayed settlement from an older run cannot release the next run",
+		!isCurrentSessionRuntimeSettlement(5, scheduledEpoch, true),
+	);
+
+	const fakeScheduledSettlements: Array<() => boolean> = [];
+	let fakeEpoch = 8;
+	let fakeLifecycle = ended;
+	const queueSettlement = (): void => {
+		const queuedEpoch = fakeEpoch;
+		fakeScheduledSettlements.push(() =>
+			isCurrentSessionRuntimeSettlement(fakeEpoch, queuedEpoch, fakeLifecycle.awaitingAgentSettled)
+		);
+	};
+	queueSettlement();
+	// A new prompt starts before the old zero-delay settlement callback runs.
+	fakeEpoch += 1;
+	fakeLifecycle = reduceSessionRuntimeLifecycle(fakeLifecycle, { type: "agent_start" });
+	check(
+		"fake scheduler keeps the new run protected when the old settled callback drains",
+		fakeScheduledSettlements.shift()?.() === false &&
+			isSessionRuntimeLifecycleProtected("ready", fakeLifecycle),
+	);
+
+	const disconnected = reduceSessionRuntimeLifecycle(ended, { type: "terminal_failure" });
+	check(
+		"disconnect terminalizes the original run instead of leaving a permanent fence",
+		!isSessionRuntimeLifecycleProtected("ready", disconnected) &&
+			resolveSessionRuntimeEventSource("runtime-a", "runtime-b") === "background",
+		disconnected,
+	);
 }
 
 {

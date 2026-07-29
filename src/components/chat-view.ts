@@ -7,7 +7,11 @@ import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { html, nothing, render, type TemplateResult } from "lit";
 import { t } from "../i18n/index.js";
 import { promptDialog } from "./app-dialog.js";
-import { resolveSessionRefreshScrollAction, resolveViewportPopoverLeft } from "./desktop-ui-behavior.js";
+import {
+	resolveModelPickerSubmenuPlacement,
+	resolveSessionRefreshScrollAction,
+	resolveViewportPopoverLeft,
+} from "./desktop-ui-behavior.js";
 import { openImageLightbox } from "./image-lightbox.js";
 import {
 	type PiAuthProviderStatus,
@@ -526,6 +530,8 @@ export class ChatView {
 	private thinkingMenuOpen = false;
 	private modelPickerActiveProvider = "";
 	private modelPickerGlobalListenersBound = false;
+	private modelPickerLayoutFrame: number | null = null;
+	private modelPickerResizeObserver: ResizeObserver | null = null;
 	private runningProviderAuthAction: { provider: string; action: "login" | "logout" } | null = null;
 	private sendingPrompt = false;
 	private pendingImages: PendingImage[] = [];
@@ -1504,6 +1510,7 @@ export class ChatView {
 		if (!this.modelPickerOpen) return;
 		this.modelPickerOpen = false;
 		this.modelPickerSubmenuOpen = false;
+		this.cancelModelPickerLayout();
 		this.render();
 		if (options.focusComposer) {
 			requestAnimationFrame(() => this.focusInput());
@@ -1557,36 +1564,99 @@ export class ChatView {
 
 	private clampModelPickerPopover(): void {
 		this.clampUpwardPopover(".model-picker-root", ".model-picker-popover", 244);
-		requestAnimationFrame(() => {
-			const root = this.container.querySelector<HTMLElement>(".model-picker-root");
-			const popover = this.container.querySelector<HTMLElement>(".model-picker-popover");
-			if (!root || !popover) return;
-			const rootRect = root.getBoundingClientRect();
-			const popoverRect = popover.getBoundingClientRect();
-			if (rootRect.width === 0 || popoverRect.width === 0) return;
-			const chatRoot = root.closest<HTMLElement>(".chat-root") ?? this.container.querySelector<HTMLElement>(".chat-root");
-			const chatRect = chatRoot?.getBoundingClientRect();
-			const rootStyle = getComputedStyle(root);
-			const configuredSubmenuWidth = Number.parseFloat(rootStyle.getPropertyValue("--model-picker-submenu-width")) || 204;
-			const submenuGap = Number.parseFloat(rootStyle.getPropertyValue("--model-picker-submenu-gap")) || 3;
-			const viewportLeft = resolveViewportPopoverLeft(
-				rootRect.right,
-				popoverRect.width,
-				window.innerWidth,
-			);
-			const submenu = popover.querySelector<HTMLElement>(".model-picker-model-submenu");
-			const submenuWidth = submenu?.getBoundingClientRect().width || configuredSubmenuWidth;
-			const contentLeft = Math.max(8, (chatRect?.left ?? 0) + 8);
-			const contentRight = Math.min(window.innerWidth - 8, (chatRect?.right ?? window.innerWidth) - 8);
-			const minimumLeftForSubmenu = contentLeft + submenuWidth + submenuGap;
+		this.scheduleModelPickerLayout();
+	}
+
+	private positionModelPickerSubmenu(): void {
+		this.scheduleModelPickerLayout();
+	}
+
+	private scheduleModelPickerLayout(): void {
+		if (!this.modelPickerOpen || this.modelPickerLayoutFrame !== null) return;
+		this.modelPickerLayoutFrame = requestAnimationFrame(() => {
+			this.modelPickerLayoutFrame = null;
+			this.layoutModelPicker();
+		});
+	}
+
+	private cancelModelPickerLayout(): void {
+		if (this.modelPickerLayoutFrame !== null) {
+			cancelAnimationFrame(this.modelPickerLayoutFrame);
+			this.modelPickerLayoutFrame = null;
+		}
+		this.modelPickerResizeObserver?.disconnect();
+	}
+
+	private layoutModelPicker(): void {
+		if (!this.modelPickerOpen) return;
+		const root = this.container.querySelector<HTMLElement>(".model-picker-root");
+		const popover = this.container.querySelector<HTMLElement>(".model-picker-popover");
+		const activeRow = popover?.querySelector<HTMLElement>(".model-picker-provider-row.active");
+		const submenu = popover?.querySelector<HTMLElement>(".model-picker-model-submenu");
+		if (!root || !popover) return;
+		const chatRoot = root.closest<HTMLElement>(".chat-root") ?? this.container.querySelector<HTMLElement>(".chat-root");
+		this.observeModelPickerLayout(root, popover, chatRoot);
+		const rootRect = root.getBoundingClientRect();
+		const popoverRect = popover.getBoundingClientRect();
+		if (rootRect.width === 0 || popoverRect.width === 0) return;
+		const chatRect = chatRoot?.getBoundingClientRect();
+		const contentLeft = Math.max(8, (chatRect?.left ?? 0) + 8);
+		const contentRight = Math.min(window.innerWidth - 8, (chatRect?.right ?? window.innerWidth) - 8);
+		const preferredPopoverLeft = resolveViewportPopoverLeft(
+			rootRect.right,
+			popoverRect.width,
+			window.innerWidth,
+		);
+
+		if (!activeRow || !submenu || !this.modelPickerSubmenuOpen) {
 			const maximumLeft = Math.max(contentLeft, contentRight - popoverRect.width);
-			const clampedLeft = Math.min(
-				Math.max(viewportLeft, minimumLeftForSubmenu),
-				maximumLeft,
-			);
+			const clampedLeft = Math.min(Math.max(preferredPopoverLeft, contentLeft), maximumLeft);
 			popover.style.right = "auto";
 			popover.style.left = `${Math.round(clampedLeft - rootRect.left)}px`;
+			return;
+		}
+
+		submenu.style.width = "";
+		submenu.style.maxHeight = "";
+		const activeRowRect = activeRow.getBoundingClientRect();
+		const naturalSubmenuRect = submenu.getBoundingClientRect();
+		if (activeRowRect.height === 0 || naturalSubmenuRect.width === 0) return;
+		const rootStyle = getComputedStyle(root);
+		const configuredSubmenuWidth = Number.parseFloat(rootStyle.getPropertyValue("--model-picker-submenu-width")) || naturalSubmenuRect.width;
+		const submenuGap = Number.parseFloat(rootStyle.getPropertyValue("--model-picker-submenu-gap")) || 3;
+		const placement = resolveModelPickerSubmenuPlacement({
+			preferredPopoverLeft,
+			popoverWidth: popoverRect.width,
+			popoverTop: popoverRect.top,
+			anchorTop: activeRowRect.top,
+			submenuWidth: configuredSubmenuWidth,
+			submenuHeight: naturalSubmenuRect.height,
+			contentLeft,
+			contentRight,
+			contentBottom: rootRect.top - 8,
+			gap: submenuGap,
 		});
+		popover.style.right = "auto";
+		popover.style.left = `${Math.round(placement.popoverLeft - rootRect.left)}px`;
+		submenu.style.right = "auto";
+		submenu.style.left = `${Math.round(placement.submenuLeft - placement.popoverLeft - popover.clientLeft)}px`;
+		submenu.style.top = `${Math.round(placement.top - popover.clientTop)}px`;
+		submenu.style.width = `${Math.round(placement.submenuWidth)}px`;
+		submenu.style.maxHeight = `${Math.round(placement.submenuMaxHeight)}px`;
+		submenu.dataset.side = placement.side;
+	}
+
+	private observeModelPickerLayout(
+		root: HTMLElement,
+		popover: HTMLElement,
+		chatRoot: HTMLElement | null,
+	): void {
+		if (typeof ResizeObserver === "undefined") return;
+		this.modelPickerResizeObserver ??= new ResizeObserver(() => this.scheduleModelPickerLayout());
+		this.modelPickerResizeObserver.disconnect();
+		this.modelPickerResizeObserver.observe(root);
+		this.modelPickerResizeObserver.observe(popover);
+		if (chatRoot) this.modelPickerResizeObserver.observe(chatRoot);
 	}
 
 	private toggleModelPicker(preferredProvider = ""): void {
@@ -1853,11 +1923,17 @@ export class ChatView {
 		}
 	};
 
+	private onGlobalViewportChangeForModelPicker = (): void => {
+		if (!this.modelPickerOpen) return;
+		this.clampModelPickerPopover();
+	};
+
 	private bindModelPickerGlobalListeners(): void {
 		if (this.modelPickerGlobalListenersBound || typeof document === "undefined") return;
 		document.addEventListener("pointerdown", this.onGlobalPointerDownForModelPicker, true);
 		document.addEventListener("mousedown", this.onGlobalPointerDownForModelPicker, true);
 		document.addEventListener("keydown", this.onGlobalEscapeForModelPicker, true);
+		window.addEventListener("resize", this.onGlobalViewportChangeForModelPicker, true);
 		this.modelPickerGlobalListenersBound = true;
 	}
 
@@ -1866,6 +1942,7 @@ export class ChatView {
 		document.removeEventListener("pointerdown", this.onGlobalPointerDownForModelPicker, true);
 		document.removeEventListener("mousedown", this.onGlobalPointerDownForModelPicker, true);
 		document.removeEventListener("keydown", this.onGlobalEscapeForModelPicker, true);
+		window.removeEventListener("resize", this.onGlobalViewportChangeForModelPicker, true);
 		this.modelPickerGlobalListenersBound = false;
 	}
 
@@ -1898,6 +1975,8 @@ export class ChatView {
 		}
 		this.nativeFileDropUnlisteners = [];
 		this.unbindModelPickerGlobalListeners();
+		this.cancelModelPickerLayout();
+		this.modelPickerResizeObserver = null;
 		this.composerResizeObserver?.disconnect();
 		this.composerResizeObserver = null;
 		this.observedComposerElement = null;
@@ -5560,6 +5639,7 @@ export class ChatView {
 			onCloseModelPicker: (options) => this.closeModelPicker(options),
 			onToggleModelPicker: (preferredProvider) => this.toggleModelPicker(preferredProvider),
 			onSetModelPickerActiveProvider: (provider) => this.setModelPickerActiveProvider(provider),
+			onPositionModelPickerSubmenu: () => this.positionModelPickerSubmenu(),
 			onProviderAuthAction: (provider, action) => this.handleProviderAuthAction(provider, action),
 			onSelectModel: (provider, modelId) => this.setModel(provider, modelId),
 			onSetThinkingLevel: (value) => this.setThinkingLevel(value),
@@ -5977,6 +6057,7 @@ export class ChatView {
 		this.syncWorkflowElapsedTicker();
 		this.syncWorkingStatusAnimation();
 		this.ensureActiveSlashItemVisible();
+		if (this.modelPickerOpen) this.scheduleModelPickerLayout();
 	}
 
 	notify(text: string, kind: "info" | "success" | "error" = "info"): void {

@@ -84,6 +84,7 @@ interface RenderComposerControlsViewParams {
 	onCloseModelPicker: (options?: CloseModelPickerOptions) => void;
 	onToggleModelPicker: (preferredProvider: string) => void;
 	onSetModelPickerActiveProvider: (provider: string) => void;
+	onPositionModelPickerSubmenu: () => void;
 	onProviderAuthAction: (provider: string, action: "login" | "logout") => void | Promise<unknown>;
 	onSelectModel: (provider: string, modelId: string) => void | Promise<unknown>;
 	onSetThinkingLevel: (value: ThinkingLevel) => void | Promise<unknown>;
@@ -132,6 +133,7 @@ export function renderComposerControlsView({
 	onCloseModelPicker,
 	onToggleModelPicker,
 	onSetModelPickerActiveProvider,
+	onPositionModelPickerSubmenu,
 	onProviderAuthAction,
 	onSelectModel,
 	onSetThinkingLevel,
@@ -257,7 +259,10 @@ export function renderComposerControlsView({
 										? html`<div class="model-picker-empty ui-loading-host" role="status" aria-label=${t("composer.controls.loadingModels")}><span class="ui-loading-spinner small"></span></div>`
 										: html`<div class="model-picker-empty">${t("composer.controls.noConfiguredProviders")}</div>`
 									: html`
-										<div class="model-picker-providers">
+										<div
+											class="model-picker-providers"
+											@scroll=${() => onPositionModelPickerSubmenu()}
+										>
 											${providerGroups.map((group) => {
 												const authKey = normalizeProviderKey(group.providerKey);
 												const actionState = resolveModelPickerProviderAuthActionState({

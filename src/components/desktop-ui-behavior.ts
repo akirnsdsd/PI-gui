@@ -53,3 +53,90 @@ export function resolveViewportPopoverLeft(
 	const preferredLeft = anchorRight - popoverWidth;
 	return Math.min(maxLeft, Math.max(safePadding, preferredLeft));
 }
+
+export interface ModelPickerSubmenuPlacementInput {
+	preferredPopoverLeft: number;
+	popoverWidth: number;
+	popoverTop: number;
+	anchorTop: number;
+	submenuWidth: number;
+	submenuHeight: number;
+	contentLeft: number;
+	contentRight: number;
+	contentBottom: number;
+	gap: number;
+}
+
+export interface ModelPickerSubmenuPlacement {
+	side: "left" | "right";
+	popoverLeft: number;
+	submenuLeft: number;
+	submenuWidth: number;
+	submenuMaxHeight: number;
+	top: number;
+}
+
+/**
+ * 模型二级菜单以当前渠道行为纵向锚点，并优先向右展开。
+ * 若右侧空间不足则翻到左侧；极窄窗口两侧都放不下时，选择溢出更少的一侧，
+ * 再把最终位置夹在聊天内容区内，避免菜单钻进侧栏或跑出窗口。
+ */
+export function resolveModelPickerSubmenuPlacement({
+	preferredPopoverLeft,
+	popoverWidth,
+	popoverTop,
+	anchorTop,
+	submenuWidth,
+	submenuHeight,
+	contentLeft,
+	contentRight,
+	contentBottom,
+	gap,
+}: ModelPickerSubmenuPlacementInput): ModelPickerSubmenuPlacement {
+	const safeGap = Math.max(0, gap);
+	const minLeft = Math.min(contentLeft, contentRight);
+	const maxRight = Math.max(contentLeft, contentRight);
+	const contentWidth = Math.max(0, maxRight - minLeft);
+	const safePopoverWidth = Math.min(Math.max(0, popoverWidth), contentWidth);
+	const maximumSubmenuWidth = Math.max(0, contentWidth - safePopoverWidth - safeGap);
+	const safeSubmenuWidth = Math.min(Math.max(0, submenuWidth), maximumSubmenuWidth);
+	const maximumPopoverLeft = Math.max(minLeft, maxRight - safePopoverWidth);
+	let resolvedPopoverLeft = Math.min(maximumPopoverLeft, Math.max(minLeft, preferredPopoverLeft));
+	const preferredRightLeft = resolvedPopoverLeft + safePopoverWidth + safeGap;
+	const preferredLeftLeft = resolvedPopoverLeft - safeGap - safeSubmenuWidth;
+	const rightFits = preferredRightLeft + safeSubmenuWidth <= maxRight;
+	const leftFits = preferredLeftLeft >= minLeft;
+	let side: "left" | "right";
+	let submenuLeft: number;
+
+	if (rightFits) {
+		side = "right";
+		submenuLeft = preferredRightLeft;
+	} else if (leftFits) {
+		side = "left";
+		submenuLeft = preferredLeftLeft;
+	} else {
+		// 两边在原锚点都放不下时，保持默认向右，并把一、二级菜单作为整体平移。
+		side = "right";
+		const pairWidth = safePopoverWidth + safeGap + safeSubmenuWidth;
+		resolvedPopoverLeft = Math.min(
+			Math.max(minLeft, maxRight - pairWidth),
+			Math.max(minLeft, preferredPopoverLeft),
+		);
+		submenuLeft = resolvedPopoverLeft + safePopoverWidth + safeGap;
+	}
+
+	const availableHeight = Math.max(0, contentBottom - anchorTop);
+	const submenuMaxHeight = Math.min(
+		Math.max(0, submenuHeight),
+		availableHeight,
+	);
+	return {
+		side,
+		popoverLeft: resolvedPopoverLeft,
+		submenuLeft,
+		submenuWidth: safeSubmenuWidth,
+		submenuMaxHeight,
+		top: Math.max(0, anchorTop - popoverTop),
+	};
+}
