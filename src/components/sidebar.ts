@@ -6,10 +6,7 @@ import { html, nothing, render, type TemplateResult } from "lit";
 import { t } from "../i18n/index.js";
 import { alertDialog, confirmDialog, promptDialog } from "./app-dialog.js";
 import { clearActiveDraggedFilePaths, setActiveDraggedFilePaths } from "./file-drag-transfer.js";
-import {
-	resolveSidebarSessionStatus,
-	type SessionRunOutcome,
-} from "./sidebar-session-status.js";
+import { resolveSidebarSessionStatus } from "./sidebar-session-status.js";
 import { EMOJI_CATALOG } from "./workspace-tabs.js";
 
 export type SidebarMode = "projects" | "files";
@@ -138,6 +135,7 @@ interface Project {
 	name: string;
 	color: string;
 	emoji: string;
+	pinned: boolean;
 	expanded: boolean;
 	sessions: SidebarSession[];
 	loadingSessions: boolean;
@@ -153,6 +151,7 @@ interface PersistedProject {
 	name: string;
 	color: string;
 	emoji?: string;
+	pinned?: boolean;
 }
 
 interface FileNode {
@@ -172,6 +171,7 @@ interface FileNode {
 type SidebarContextTarget =
 	| { kind: "session"; projectId: string; sessionPath: string }
 	| { kind: "file"; projectId: string; filePath: string; isDirectory: boolean }
+	| { kind: "project"; projectId: string }
 	| { kind: "workspace"; workspaceId: string };
 
 const LEGACY_STORAGE_KEY = "pi-desktop.projects.v1";
@@ -323,7 +323,6 @@ export class Sidebar {
 	private activeFilePath: string | null = null;
 	private runningSessionPaths = new Set<string>();
 	private suspendedSessionPaths = new Set<string>();
-	private sessionRunOutcomes = new Map<string, SessionRunOutcome>();
 	private attentionSessionMessages = new Map<string, string>();
 	private workspaces: SidebarWorkspaceItem[] = [];
 	private activeWorkspaceId: string | null = null;
@@ -355,6 +354,7 @@ export class Sidebar {
 	private projectEmojiPickerY = 0;
 	private projectEmojiSearchQuery = "";
 	private projectEmojiPortalHost: HTMLElement | null = null;
+	private contextMenuPortalHost: HTMLElement | null = null;
 	private workspaceEmojiPortalHost: HTMLElement | null = null;
 	private workspaceCreatePortalHost: HTMLElement | null = null;
 	private workspaceCreateDialogFocusTrapActive = false;
@@ -382,7 +382,6 @@ export class Sidebar {
 	private sessionLoadsInFlight = new Map<string, Promise<void>>();
 	private sessionReloadQueued = new Set<string>();
 	private packagesOpen = false;
-	private openProjectMenuId: string | null = null;
 	private modeFilterMenuOpen = false;
 	private desktopUpdateAvailable = false;
 	private desktopUpdateLatestVersion: string | null = null;
@@ -418,6 +417,7 @@ export class Sidebar {
 	private onWorkspaceDelete: ((workspaceId: string) => void) | null = null;
 	private onProjectSelect: ((project: { id: string; name: string; path: string } | null) => void) | null = null;
 	private onProjectRemoved: ((project: { id: string; name: string; path: string }) => void) | null = null;
+	private onProjectMarkRead: ((project: { id: string; name: string; path: string }) => void) | null = null;
 	private onSessionSelect: ((projectId: string, sessionPath: string, sessionName?: string) => void) | null = null;
 	private onSessionPrewarm: ((projectId: string, sessionPath: string) => void) | null = null;
 	private sessionPrewarmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -514,14 +514,12 @@ export class Sidebar {
 		this.activeFilePath = null;
 		this.runningSessionPaths.clear();
 		this.suspendedSessionPaths.clear();
-		this.sessionRunOutcomes.clear();
 		this.attentionSessionMessages.clear();
 		this.fileTrees.clear();
 		this.fileTreeErrors.clear();
 		this.loadingFileTreeForProject.clear();
 		this.sessionLoadsInFlight.clear();
 		this.sessionReloadQueued.clear();
-		this.openProjectMenuId = null;
 		this.modeFilterMenuOpen = false;
 		this.workspaceMenuOpen = false;
 		this.workspaceRenameDraft = null;
@@ -694,6 +692,10 @@ export class Sidebar {
 		this.onProjectRemoved = cb;
 	}
 
+	setOnProjectMarkRead(cb: (project: { id: string; name: string; path: string }) => void): void {
+		this.onProjectMarkRead = cb;
+	}
+
 	setOnSessionSelect(cb: (projectId: string, sessionPath: string, sessionName?: string) => void): void {
 		this.onSessionSelect = cb;
 	}
@@ -777,7 +779,6 @@ export class Sidebar {
 		if (this.settingsShellActive === active) return;
 		this.settingsShellActive = active;
 		this.modeFilterMenuOpen = false;
-		this.openProjectMenuId = null;
 		this.closeContextMenu(false);
 		this.render();
 	}
@@ -844,10 +845,6 @@ export class Sidebar {
 			this.closeProjectEmojiPicker(false);
 			changed = true;
 		}
-		if (this.openProjectMenuId) {
-			this.openProjectMenuId = null;
-			changed = true;
-		}
 		if (this.modeFilterMenuOpen) {
 			this.modeFilterMenuOpen = false;
 			changed = true;
@@ -881,7 +878,6 @@ export class Sidebar {
 		const anyOpen = Boolean(this.contextMenu) ||
 			Boolean(this.emojiPickerWorkspaceId) ||
 			Boolean(this.projectEmojiPickerProjectId) ||
-			Boolean(this.openProjectMenuId) ||
 			this.modeFilterMenuOpen;
 		if (anyOpen && !this.popupGlobalListenersBound) {
 			window.addEventListener("keydown", this.onWindowPopupKeyDown, true);
@@ -894,25 +890,28 @@ export class Sidebar {
 		}
 	}
 
-	private openContextMenu(e: MouseEvent, target: SidebarContextTarget): void {
+	private openContextMenu(
+		e: MouseEvent,
+		target: SidebarContextTarget,
+		anchor?: { x: number; y: number },
+	): void {
 		e.preventDefault();
 		e.stopPropagation();
-		const menuWidth = 170;
+		const menuWidth = target.kind === "project" ? 208 : 176;
 		const menuHeight = target.kind === "workspace"
 			? 92
+			: target.kind === "project"
+				? 230
 			: target.kind === "session"
 				? 194
 				: target.isDirectory
 					? 52
 					: 122;
 		const padding = 8;
-		const bounds = this.container.getBoundingClientRect();
-		const minX = Math.max(padding, Math.floor(bounds.left + padding));
-		const maxX = Math.min(window.innerWidth - menuWidth - padding, Math.floor(bounds.right - menuWidth - padding));
-		const minY = Math.max(padding, Math.floor(bounds.top + padding));
-		const maxY = Math.min(window.innerHeight - menuHeight - padding, Math.floor(bounds.bottom - menuHeight - padding));
-		const x = Math.max(minX, Math.min(e.clientX, Math.max(minX, maxX)));
-		const y = Math.max(minY, Math.min(e.clientY, Math.max(minY, maxY)));
+		const maxX = Math.max(padding, window.innerWidth - menuWidth - padding);
+		const maxY = Math.max(padding, window.innerHeight - menuHeight - padding);
+		const x = Math.max(padding, Math.min(anchor?.x ?? e.clientX, maxX));
+		const y = Math.max(padding, Math.min(anchor?.y ?? e.clientY, maxY));
 		this.closeWorkspaceEmojiPicker(false);
 		this.closeProjectEmojiPicker(false);
 		this.contextMenu = { x, y, target };
@@ -1084,29 +1083,6 @@ export class Sidebar {
 		}
 
 		this.suspendedSessionPaths = next;
-		this.render();
-	}
-
-	setSessionRunOutcomes(entries: Array<{ path: string; outcome: SessionRunOutcome }>): void {
-		const next = new Map<string, SessionRunOutcome>();
-		for (const entry of entries) {
-			const path = normalizePath(entry.path);
-			if (!path) continue;
-			next.set(path, entry.outcome);
-		}
-
-		if (next.size === this.sessionRunOutcomes.size) {
-			let identical = true;
-			for (const [path, outcome] of next) {
-				if (this.sessionRunOutcomes.get(path) !== outcome) {
-					identical = false;
-					break;
-				}
-			}
-			if (identical) return;
-		}
-
-		this.sessionRunOutcomes = next;
 		this.render();
 	}
 
@@ -1314,6 +1290,7 @@ export class Sidebar {
 				name,
 				color: stringToColor(name),
 				emoji: normalizeProjectEmoji(null),
+				pinned: false,
 				expanded: true,
 				sessions: [],
 				loadingSessions: false,
@@ -1353,6 +1330,7 @@ export class Sidebar {
 			name,
 			color: stringToColor(name),
 			emoji: normalizeProjectEmoji(null),
+			pinned: false,
 			expanded: false,
 			sessions: [],
 			loadingSessions: false,
@@ -1645,6 +1623,27 @@ export class Sidebar {
 		this.openContextMenu(e, { kind: "workspace", workspaceId });
 	}
 
+	private handleProjectContextMenu(e: MouseEvent, projectId: string): void {
+		this.clearInlineDrafts();
+		this.openContextMenu(e, { kind: "project", projectId });
+	}
+
+	private openProjectActionsMenu(e: MouseEvent, projectId: string): void {
+		const button = e.currentTarget as HTMLElement | null;
+		const rect = button?.getBoundingClientRect();
+		const menuWidth = 208;
+		this.openContextMenu(
+			e,
+			{ kind: "project", projectId },
+			rect
+				? {
+					x: rect.right - menuWidth,
+					y: rect.bottom + 4,
+				}
+				: undefined,
+		);
+	}
+
 	private runSessionContextAction(action: "rename" | "delete" | "fork" | "markUnread" | "togglePin"): void {
 		const target = this.contextMenu?.target;
 		if (!target || target.kind !== "session") return;
@@ -1729,6 +1728,65 @@ export class Sidebar {
 		this.onWorkspaceDelete?.(workspace.id);
 	}
 
+	private async revealProjectInFinder(project: Project): Promise<void> {
+		try {
+			const { invoke } = await import("@tauri-apps/api/core");
+			await invoke("open_path_in_default_app", { path: project.path });
+		} catch (err) {
+			console.error("Failed to reveal project in Finder:", err);
+			await alertDialog(err instanceof Error ? err.message : String(err), { title: t("common.error") });
+		}
+	}
+
+	private runProjectContextAction(
+		action: "togglePin" | "reveal" | "rename" | "changeEmoji" | "markRead" | "remove",
+		event?: MouseEvent,
+	): void {
+		const target = this.contextMenu?.target;
+		if (!target || target.kind !== "project") return;
+		const project = this.projects.find((entry) => entry.id === target.projectId) ?? null;
+		if (!project) {
+			this.closeContextMenu();
+			return;
+		}
+
+		this.closeContextMenu(false);
+		if (action === "togglePin") {
+			project.pinned = !project.pinned;
+			this.sortProjectsInPlace();
+			this.persistProjects();
+			this.render();
+			return;
+		}
+		if (action === "reveal") {
+			this.render();
+			void this.revealProjectInFinder(project);
+			return;
+		}
+		if (action === "rename") {
+			this.render();
+			void this.renameProject(project.id);
+			return;
+		}
+		if (action === "changeEmoji" && event) {
+			this.openProjectEmojiPicker(project.id, event);
+			return;
+		}
+		if (action === "markRead") {
+			for (const session of project.sessions) {
+				this.attentionSessionMessages.delete(normalizePath(session.path));
+			}
+			this.onProjectMarkRead?.({ id: project.id, name: project.name, path: project.path });
+			this.render();
+			return;
+		}
+		if (action === "remove") {
+			this.removeProject(project.id);
+			return;
+		}
+		this.render();
+	}
+
 	private renderContextMenu(): TemplateResult | typeof nothing {
 		const menu = this.contextMenu;
 		if (!menu) return nothing;
@@ -1761,6 +1819,23 @@ export class Sidebar {
 							<button @click=${() => this.runFileContextAction("rename")}>${t("sidebar.file.rename")}</button>
 							<button class="danger" @click=${() => this.runFileContextAction("delete")}>${t("sidebar.file.delete")}</button>
 						`}
+				</div>
+			`;
+		} else if (target.kind === "project") {
+			const project = this.projects.find((entry) => entry.id === target.projectId) ?? null;
+			if (!project) return nothing;
+			menuContent = html`
+				<div class="sidebar-context-menu" style=${`left:${menu.x}px;top:${menu.y}px`} @click=${(e: Event) => e.stopPropagation()}>
+					<button @click=${() => this.runProjectContextAction("togglePin")}>
+						${project.pinned ? t("sidebar.project.unpin") : t("sidebar.project.pin")}
+					</button>
+					<button @click=${() => this.runProjectContextAction("reveal")}>${t("sidebar.project.revealInFinder")}</button>
+					<div class="sidebar-context-menu-divider"></div>
+					<button @click=${() => this.runProjectContextAction("rename")}>${t("sidebar.project.rename")}</button>
+					<button @click=${(event: MouseEvent) => this.runProjectContextAction("changeEmoji", event)}>${t("sidebar.project.changeEmoji")}</button>
+					<button @click=${() => this.runProjectContextAction("markRead")}>${t("sidebar.project.markAllRead")}</button>
+					<div class="sidebar-context-menu-divider"></div>
+					<button class="danger" @click=${() => this.runProjectContextAction("remove")}>${t("sidebar.project.remove")}</button>
 				</div>
 			`;
 		} else {
@@ -2290,17 +2365,10 @@ export class Sidebar {
 		this.onFileOpen?.(projectId, filePath);
 	}
 
-	private toggleProjectMenu(projectId: string): void {
-		this.closeContextMenu(false);
-		this.openProjectMenuId = this.openProjectMenuId === projectId ? null : projectId;
-		this.render();
-	}
-
 	private setProjectColor(projectId: string, color: string | null): void {
 		const project = this.projects.find((entry) => entry.id === projectId);
 		if (!project) return;
 		project.color = color ?? stringToColor(project.name);
-		this.openProjectMenuId = null;
 		this.persistProjects();
 		this.render();
 	}
@@ -2310,14 +2378,12 @@ export class Sidebar {
 		if (!project) return;
 		const nextName = (await promptDialog({ title: t("sidebar.dialogs.renameProject"), value: project.name }))?.trim();
 		if (!nextName || nextName === project.name) {
-			this.openProjectMenuId = null;
 			this.render();
 			return;
 		}
 
 		project.name = nextName;
 		this.persistProjects();
-		this.openProjectMenuId = null;
 		this.render();
 
 		if (this.activeProjectId === project.id) {
@@ -2330,7 +2396,6 @@ export class Sidebar {
 		this.projects = this.projects.filter((p) => p.id !== projectId);
 		this.fileTrees.delete(projectId);
 		this.fileTreeErrors.delete(projectId);
-		this.openProjectMenuId = this.openProjectMenuId === projectId ? null : this.openProjectMenuId;
 
 		if (this.activeProjectId === projectId) {
 			this.activeProjectId = this.projects[0]?.id ?? null;
@@ -2370,6 +2435,7 @@ export class Sidebar {
 			name: p.name,
 			color: p.color,
 			emoji: normalizeProjectEmoji(p.emoji),
+			pinned: p.pinned,
 		}));
 		localStorage.setItem(this.storageKey, JSON.stringify(data));
 	}
@@ -2519,6 +2585,7 @@ export class Sidebar {
 					name: p.name,
 					color: typeof p.color === "string" && p.color.trim().length > 0 ? p.color : stringToColor(p.name || pathBaseName(p.path)),
 					emoji: normalizeProjectEmoji(p.emoji),
+					pinned: p.pinned === true,
 					expanded: idx === 0,
 					sessions: [],
 					loadingSessions: false,
@@ -2537,7 +2604,9 @@ export class Sidebar {
 	}
 
 	private sortProjectsInPlace(): void {
-		// Keep explicit drag order; no project pin groups.
+		// Stable sort: pinned projects stay ahead while preserving the user's
+		// explicit drag order inside each group.
+		this.projects.sort((a, b) => Number(b.pinned) - Number(a.pinned));
 	}
 
 	private filteredProjects(includeQuery = true): Project[] {
@@ -2934,7 +3003,6 @@ export class Sidebar {
 		const pickerWidth = 272;
 		const pickerHeight = 332;
 		const { x, y } = this.computeEmojiPickerPosition(this.resolveProjectEmojiAnchor(projectId, event), pickerWidth, pickerHeight);
-		this.openProjectMenuId = null;
 		this.projectEmojiPickerProjectId = projectId;
 		this.projectEmojiSearchQuery = "";
 		this.projectEmojiPickerX = x;
@@ -4218,6 +4286,24 @@ export class Sidebar {
 		render(this.renderProjectEmojiPicker(), host);
 	}
 
+	/** 右键菜单走 body portal，避免被侧栏 backdrop-filter 的 containing block
+	 * 限制在侧栏内部，也保证小窗口覆盖侧栏时仍位于聊天内容之上。 */
+	private ensureContextMenuPortalHost(): HTMLElement | null {
+		if (typeof document === "undefined") return null;
+		if (this.contextMenuPortalHost && document.body.contains(this.contextMenuPortalHost)) return this.contextMenuPortalHost;
+		const host = document.createElement("div");
+		host.className = "sidebar-context-menu-portal-host";
+		document.body.appendChild(host);
+		this.contextMenuPortalHost = host;
+		return host;
+	}
+
+	private renderContextMenuPortal(): void {
+		const host = this.ensureContextMenuPortalHost();
+		if (!host) return;
+		render(this.renderContextMenu(), host);
+	}
+
 	/** workspace emoji 弹层同样走 body portal：.sidebar-single 的 backdrop-filter 会把 fixed 后代限制在侧栏内，backdrop 盖不住主内容区。 */
 	private ensureWorkspaceEmojiPortalHost(): HTMLElement | null {
 		if (typeof document === "undefined") return null;
@@ -4235,48 +4321,26 @@ export class Sidebar {
 		render(this.renderWorkspaceEmojiPicker(), host);
 	}
 
-	private renderSessionPiIcon(
+	private renderSessionStatusIndicator(
 		running = false,
 		suspended = false,
-		outcome: SessionRunOutcome | null = null,
+		unread = false,
 	): TemplateResult | typeof nothing {
-		const status = resolveSidebarSessionStatus(running, suspended, outcome);
+		const status = resolveSidebarSessionStatus(running, suspended, unread);
 		if (!status) return nothing;
 		const stateTitle =
 			status === "running"
 				? t("sidebar.session.running")
 				: status === "suspended"
 					? t("sidebar.session.suspended")
-					: status === "completed"
-						? t("sidebar.session.completed")
-						: t("sidebar.session.failed");
-		if (status === "completed") {
-			return html`
-				<span class="sidebar-session-pi completed" title=${stateTitle} role="img" aria-label=${stateTitle}>
-					<svg viewBox="0 0 16 16" aria-hidden="true">
-						<circle cx="8" cy="8" r="5.7"></circle>
-						<path d="m5.2 8.1 1.8 1.8 3.9-4"></path>
-					</svg>
-				</span>
-			`;
-		}
-		if (status === "failed") {
-			return html`
-				<span class="sidebar-session-pi failed" title=${stateTitle} role="img" aria-label=${stateTitle}>
-					<svg viewBox="0 0 16 16" aria-hidden="true">
-						<circle cx="8" cy="8" r="5.7"></circle>
-						<path d="m6 6 4 4M10 6l-4 4"></path>
-					</svg>
-				</span>
-			`;
-		}
+					: t("sidebar.session.unread");
 		return html`
-			<span class="sidebar-session-pi ${status}" title=${stateTitle} role="img" aria-label=${stateTitle}>
-				<svg viewBox="0 0 16 16" aria-hidden="true">
-					<path d="M3.3 3.3H10.3V8H8V10.3H5.7V12.7H3.3Z"></path>
-					<path d="M10.3 8H12.7V12.7H10.3Z"></path>
-				</svg>
-			</span>
+			<span
+				class="sidebar-session-status ${status}"
+				title=${stateTitle}
+				role="img"
+				aria-label=${stateTitle}
+			></span>
 		`;
 	}
 
@@ -4293,17 +4357,6 @@ export class Sidebar {
 	private forkChildDisplayName(session: SidebarSession): string {
 		const prefix = t("sidebar.session.forkPrefix");
 		return session.name.startsWith(prefix) ? session.name : `${prefix}${session.name}`;
-	}
-
-	private renderProjectMenu(project: Project): TemplateResult {
-		return html`
-			<div class="sidebar-project-menu" @click=${(e: Event) => e.stopPropagation()}>
-				<button @click=${() => void this.renameProject(project.id)}>${t("sidebar.project.rename")}</button>
-				<button @click=${(event: MouseEvent) => this.openProjectEmojiPicker(project.id, event)}>${t("sidebar.project.changeEmoji")}</button>
-				<div class="sidebar-project-menu-divider"></div>
-				<button @click=${() => this.removeProject(project.id)}>${t("sidebar.project.remove")}</button>
-			</div>
-		`;
 	}
 
 	private renderChronologicalProjectsMode(projects: Project[]): TemplateResult {
@@ -4327,7 +4380,6 @@ export class Sidebar {
 						: Boolean(session.transient && this.activeProjectId === project.id && !this.activeSessionPath);
 					const runningSession = this.runningSessionPaths.has(normalizedSessionPath);
 					const suspendedSession = !runningSession && this.suspendedSessionPaths.has(normalizedSessionPath);
-					const sessionRunOutcome = this.sessionRunOutcomes.get(normalizedSessionPath) ?? null;
 					const attentionMessage = this.attentionSessionMessages.get(normalizedSessionPath) ?? null;
 					const pinnedSession = this.isSessionPinned(session.path);
 					const prevPinned = index > 0 ? this.isSessionPinned(rows[index - 1]?.session.path ?? "") : false;
@@ -4337,32 +4389,26 @@ export class Sidebar {
 					if (normalizedSessionPath) renderedChronoPaths.add(normalizedSessionPath);
 					return html`
 						${showPinnedDivider ? html`<div class="sidebar-session-pin-divider" role="separator" aria-hidden="true"></div>` : nothing}
-						<button
-							class="sidebar-chrono-row ${activeSession ? "active-session" : ""} ${pinnedSession ? "pinned" : ""} ${isForkChild ? "sidebar-chrono-row--fork" : ""}"
-							@click=${() => {
-								if (session.transient && !session.path) return;
-								this.selectProject(project.id, false);
-								this.activeSessionPath = normalizePath(session.path);
-								this.activeFilePath = null;
-								this.render();
-								this.onSessionSelect?.(project.id, session.path, session.name);
-							}}
-							@pointerenter=${() => this.handleSessionPrewarmEnter(project.id, session.path)}
-							@pointerleave=${() => this.handleSessionPrewarmLeave(project.id, session.path)}
-							@pointerdown=${() => this.handleSessionPrewarmDown(project.id, session.path)}
-							@contextmenu=${(e: MouseEvent) => this.handleSessionContextMenu(e, project, session)}
-							title=${session.path}
-						>
-							<span class="sidebar-project-emoji-inline">${normalizeProjectEmoji(project.emoji)}</span>
-							<span class="sidebar-session-leading">
-								${this.renderSessionPiIcon(runningSession, suspendedSession, sessionRunOutcome)}
-							</span>
-							<span class="sidebar-chrono-main">
-								<span class="sidebar-chrono-name sidebar-session-name ${attentionMessage ? "needs-attention" : ""}">${isForkChild ? this.renderSessionForkIcon() : nothing}${isForkChild ? this.forkChildDisplayName(session) : session.name}</span>
-								<span class="sidebar-chrono-project">${project.name}</span>
-							</span>
-							<span class="sidebar-chrono-time">${formatRelativeDate(ts)}</span>
-						</button>
+						<div class="sidebar-session-row sidebar-chrono-session-row ${activeSession ? "active" : ""} ${pinnedSession ? "pinned" : ""} ${isForkChild ? "sidebar-session-row--fork" : ""}">
+							<button
+								class="sidebar-chrono-row ${activeSession ? "active-session" : ""}"
+								@click=${() => this.activateSession(project, session)}
+								@pointerenter=${() => this.handleSessionPrewarmEnter(project.id, session.path)}
+								@pointerleave=${() => this.handleSessionPrewarmLeave(project.id, session.path)}
+								@pointerdown=${() => this.handleSessionPrewarmDown(project.id, session.path)}
+								@contextmenu=${(e: MouseEvent) => this.handleSessionContextMenu(e, project, session)}
+								title=${session.path}
+							>
+								<span class="sidebar-project-emoji-inline">${normalizeProjectEmoji(project.emoji)}</span>
+								<span class="sidebar-chrono-main">
+									<span class="sidebar-chrono-name sidebar-session-name ${attentionMessage ? "needs-attention" : ""}">${isForkChild ? this.renderSessionForkIcon() : nothing}${isForkChild ? this.forkChildDisplayName(session) : session.name}</span>
+									<span class="sidebar-chrono-project">${project.name}</span>
+								</span>
+								<span class="sidebar-chrono-time">${formatRelativeDate(ts)}</span>
+								${this.renderSessionStatusIndicator(runningSession, suspendedSession, Boolean(attentionMessage))}
+							</button>
+							${this.renderSessionRowActions(project, session)}
+						</div>
 					`;
 				})}
 			</div>
@@ -4424,7 +4470,6 @@ export class Sidebar {
 		const activeSession = normalizedSessionPath === this.activeSessionPath;
 		const runningSession = this.runningSessionPaths.has(normalizedSessionPath);
 		const suspendedSession = !runningSession && this.suspendedSessionPaths.has(normalizedSessionPath);
-		const sessionRunOutcome = this.sessionRunOutcomes.get(normalizedSessionPath) ?? null;
 		const attentionMessage = this.attentionSessionMessages.get(normalizedSessionPath) ?? null;
 		const sessionRenameActive =
 			Boolean(this.sessionRenameDraft) &&
@@ -4432,9 +4477,6 @@ export class Sidebar {
 			this.sessionRenameDraft?.sessionPath === normalizedSessionPath;
 		return html`
 			<div class="sidebar-session-row sidebar-pinned-session-row ${activeSession ? "active" : ""} pinned">
-				<span class="sidebar-session-leading">
-					${this.renderSessionPiIcon(runningSession, suspendedSession, sessionRunOutcome)}
-				</span>
 				<button
 					class="sidebar-session ${activeSession ? "active-session" : ""}"
 					@click=${() => {
@@ -4478,6 +4520,7 @@ export class Sidebar {
 								<span class="sidebar-session-name ${attentionMessage ? "needs-attention" : ""}">${session.name}</span>
 								<span class="sidebar-pinned-session-project">${project.name}</span>
 							</span>
+							${this.renderSessionStatusIndicator(runningSession, suspendedSession, Boolean(attentionMessage))}
 						`}
 				</button>
 				${sessionRenameActive ? nothing : this.renderSessionRowActions(project, session)}
@@ -4550,7 +4593,7 @@ export class Sidebar {
 			<div class="sidebar-project-list">
 				${listedProjects.map((project, index) => {
 					const active = this.activeProjectId === project.id;
-					const menuOpen = this.openProjectMenuId === project.id;
+					const menuOpen = this.contextMenu?.target.kind === "project" && this.contextMenu.target.projectId === project.id;
 					const sessions = this.visibleSessions(project).filter((session) => !this.isSessionPinned(session.path));
 					// fork 子项判定：父会话已渲染（嵌套重排保证父在子前）才按子项缩进显示。
 					const renderedSessionPaths = new Set<string>();
@@ -4560,7 +4603,7 @@ export class Sidebar {
 					const dragOver = project.id === this.projectDragOverId && this.draggingProjectId !== project.id;
 					return html`
 						<div class="sidebar-project-row ${active ? "active" : ""} ${menuOpen ? "menu-open" : ""} ${dragOver ? "drag-over" : ""} ${project.id === this.draggingProjectId ? "dragging" : ""}" data-project-id=${project.id}>
-							<div class="sidebar-project-head">
+							<div class="sidebar-project-head" @contextmenu=${(e: MouseEvent) => this.handleProjectContextMenu(e, project.id)}>
 								<div class="sidebar-project-main-wrap">
 									<button
 										class="sidebar-project-indicator-btn"
@@ -4607,13 +4650,12 @@ export class Sidebar {
 										title=${t("sidebar.actions.projectActions")}
 										@click=${(e: Event) => {
 											e.stopPropagation();
-											this.toggleProjectMenu(project.id);
+											this.openProjectActionsMenu(e as MouseEvent, project.id);
 										}}
 									>
 										<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="8" r="1.1"/><circle cx="8" cy="8" r="1.1"/><circle cx="12" cy="8" r="1.1"/></svg>
 									</button>
 									${showInlineSessionRefresh ? html`<span class="sidebar-project-inline-status">${t("sidebar.actions.refreshing")}</span>` : nothing}
-									${menuOpen ? this.renderProjectMenu(project) : nothing}
 								</div>
 							</div>
 
@@ -4640,7 +4682,6 @@ export class Sidebar {
                                                             : Boolean(session.transient && this.activeProjectId === project.id && !this.activeSessionPath);
                                                         const runningSession = this.runningSessionPaths.has(normalizedSessionPath);
                                                         const suspendedSession = !runningSession && this.suspendedSessionPaths.has(normalizedSessionPath);
-                                                        const sessionRunOutcome = this.sessionRunOutcomes.get(normalizedSessionPath) ?? null;
                                                         const attentionMessage = this.attentionSessionMessages.get(normalizedSessionPath) ?? null;
                                                         const sessionRenameActive =
                                                             Boolean(this.sessionRenameDraft) &&
@@ -4651,9 +4692,6 @@ export class Sidebar {
                                                         if (normalizedSessionPath) renderedSessionPaths.add(normalizedSessionPath);
                                                         return html`
                                                             <div class="sidebar-session-row ${activeSession ? "active" : ""} ${isForkChild ? "sidebar-session-row--fork" : ""}">
-                                                                <span class="sidebar-session-leading">
-                                                                    ${this.renderSessionPiIcon(runningSession, suspendedSession, sessionRunOutcome)}
-                                                                </span>
                                                                 <button
                                                                     class="sidebar-session ${activeSession ? "active-session" : ""}"
                                                                     @click=${() => {
@@ -4697,7 +4735,10 @@ export class Sidebar {
                                                                                 autofocus
                                                                             />
                                                                         `
-                                                                        : html`<span class="sidebar-session-name ${attentionMessage ? "needs-attention" : ""}">${isForkChild ? this.renderSessionForkIcon() : nothing}${isForkChild ? this.forkChildDisplayName(session) : session.name}</span>`}
+                                                                        : html`
+                                                                            <span class="sidebar-session-name ${attentionMessage ? "needs-attention" : ""}">${isForkChild ? this.renderSessionForkIcon() : nothing}${isForkChild ? this.forkChildDisplayName(session) : session.name}</span>
+                                                                            ${this.renderSessionStatusIndicator(runningSession, suspendedSession, Boolean(attentionMessage))}
+                                                                        `}
                                                                 </button>
                                                                 ${sessionRenameActive ? nothing : this.renderSessionRowActions(project, session)}
                                                             </div>
@@ -4731,7 +4772,7 @@ export class Sidebar {
 			<div class="sidebar-project-list">
 				${projects.map((project, index) => {
 					const active = this.activeProjectId === project.id;
-					const menuOpen = this.openProjectMenuId === project.id;
+					const menuOpen = this.contextMenu?.target.kind === "project" && this.contextMenu.target.projectId === project.id;
 					const unreadCount = this.getProjectAttentionCount(project);
 					const loading = this.loadingFileTreeForProject.has(project.id);
 					const showInlineSessionRefresh = project.loadingSessions && project.sessions.length > 0;
@@ -4742,7 +4783,7 @@ export class Sidebar {
 
 					return html`
 						<div class="sidebar-project-row ${active ? "active" : ""} ${menuOpen ? "menu-open" : ""} ${dragOver ? "drag-over" : ""} ${project.id === this.draggingProjectId ? "dragging" : ""}" data-project-id=${project.id}>
-							<div class="sidebar-project-head">
+							<div class="sidebar-project-head" @contextmenu=${(e: MouseEvent) => this.handleProjectContextMenu(e, project.id)}>
 								<div class="sidebar-project-main-wrap">
 									<button
 										class="sidebar-project-indicator-btn"
@@ -4789,13 +4830,12 @@ export class Sidebar {
 										title=${t("sidebar.actions.projectActions")}
 										@click=${(e: Event) => {
 											e.stopPropagation();
-											this.toggleProjectMenu(project.id);
+											this.openProjectActionsMenu(e as MouseEvent, project.id);
 										}}
 									>
 										<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="8" r="1.1"/><circle cx="8" cy="8" r="1.1"/><circle cx="12" cy="8" r="1.1"/></svg>
 									</button>
 									${showInlineSessionRefresh ? html`<span class="sidebar-project-inline-status">${t("sidebar.actions.refreshing")}</span>` : nothing}
-									${menuOpen ? this.renderProjectMenu(project) : nothing}
 								</div>
 							</div>
 
@@ -4923,11 +4963,6 @@ export class Sidebar {
 				@click=${(e: Event) => {
 					const target = e.target instanceof Element ? e.target : null;
 					let changed = false;
-
-					if (this.openProjectMenuId && !target?.closest(".sidebar-project-menu") && !target?.closest(".sidebar-project-action.menu")) {
-						this.openProjectMenuId = null;
-						changed = true;
-					}
 
 					if (this.modeFilterMenuOpen && !target?.closest(".sidebar-mode-filter-menu") && !target?.closest(".sidebar-mode-filter-btn")) {
 						this.modeFilterMenuOpen = false;
@@ -5063,13 +5098,13 @@ export class Sidebar {
 					${this.renderWorkspaceDock()}
 				</div>
 
-				${this.renderContextMenu()}
 				${this.renderSidebarNotice()}
 			</div>
 		`;
 
 		render(template, this.container);
 		this.renderWorkspaceCreateDialogPortal();
+		this.renderContextMenuPortal();
 		this.renderProjectEmojiPickerPortal();
 		this.renderWorkspaceEmojiPickerPortal();
 		this.syncPopupGlobalListeners();

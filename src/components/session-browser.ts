@@ -17,6 +17,17 @@ interface SessionInfo {
 	cost: number;
 }
 
+export type SessionBrowserSelection =
+	| {
+			kind: "resume";
+			path: string;
+			cwd: string | null;
+			name: string | null;
+	  }
+	| {
+			kind: "new";
+	  };
+
 interface ForkOption {
 	entryId: string;
 	text: string;
@@ -45,8 +56,8 @@ export class SessionBrowser {
 	private loading = false;
 	private query = "";
 	private onClose: (() => void) | null = null;
-	private onSessionSelected: ((sessionPath: string) => void) | null = null;
-	private onForkText: ((text: string) => void) | null = null;
+	private onSessionSelected: ((selection: SessionBrowserSelection) => void | Promise<void>) | null = null;
+	private onForkText: ((text: string) => void | Promise<void>) | null = null;
 
 	private forkMode = false;
 	private forkOptions: ForkOption[] = [];
@@ -85,11 +96,11 @@ export class SessionBrowser {
 		this.onClose = callback;
 	}
 
-	setOnSessionSelected(callback: (sessionPath: string) => void): void {
+	setOnSessionSelected(callback: (selection: SessionBrowserSelection) => void | Promise<void>): void {
 		this.onSessionSelected = callback;
 	}
 
-	setOnForkText(callback: (text: string) => void): void {
+	setOnForkText(callback: (text: string) => void | Promise<void>): void {
 		this.onForkText = callback;
 	}
 
@@ -146,10 +157,13 @@ export class SessionBrowser {
 
 	private async selectSession(session: SessionInfo): Promise<void> {
 		try {
-			const result = await rpcBridge.switchSession(session.path);
-			if (result.cancelled) return;
 			this.close();
-			this.onSessionSelected?.(session.path);
+			await this.onSessionSelected?.({
+				kind: "resume",
+				path: session.path,
+				cwd: session.cwd ?? null,
+				name: session.name ?? null,
+			});
 		} catch (err) {
 			console.error("Failed to switch session:", err);
 		}
@@ -157,11 +171,8 @@ export class SessionBrowser {
 
 	private async newSession(): Promise<void> {
 		try {
-			const result = await rpcBridge.newSession();
-			if (!result.cancelled) {
-				this.close();
-				this.onSessionSelected?.("");
-			}
+			this.close();
+			await this.onSessionSelected?.({ kind: "new" });
 		} catch (err) {
 			console.error("Failed to create new session:", err);
 		}
@@ -192,10 +203,9 @@ export class SessionBrowser {
 		try {
 			const result = await rpcBridge.fork(option.entryId);
 			if (!result.cancelled && result.text) {
-				this.onForkText?.(result.text);
+				await this.onForkText?.(result.text);
 			}
 			this.close();
-			this.onSessionSelected?.("");
 		} catch (err) {
 			console.error("Failed to fork session:", err);
 		}

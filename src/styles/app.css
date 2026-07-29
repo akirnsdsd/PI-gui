@@ -4253,12 +4253,15 @@ body.file-split-resizing #file-split-resize-handle::after {
 	inset: 0;
 	z-index: 1199;
 	background: transparent;
+	pointer-events: auto;
 }
 
 .sidebar-context-menu {
 	position: fixed;
 	z-index: 1200;
-	width: 168px;
+	width: max-content;
+	min-width: 168px;
+	max-width: min(220px, calc(100vw - 16px));
 	padding: 4px;
 	border-radius: 8px;
 	border: 1px solid var(--border);
@@ -4266,6 +4269,14 @@ body.file-split-resizing #file-split-resize-handle::after {
 	display: grid;
 	gap: 2px;
 	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+	pointer-events: auto;
+}
+
+.sidebar-context-menu-portal-host {
+	position: fixed;
+	inset: 0;
+	z-index: 1199;
+	pointer-events: none;
 }
 
 .sidebar-context-menu button {
@@ -4341,10 +4352,19 @@ body.file-split-resizing #file-split-resize-handle::after {
 }
 
 .sidebar-session-row {
+	position: relative;
 	display: flex;
 	align-items: center;
-	gap: 4px;
+	width: 100%;
+	border-radius: 6px;
 	min-width: 0;
+}
+
+.sidebar-session-row:hover,
+.sidebar-session-row:focus-within,
+.sidebar-session-row.active {
+	background: var(--bg-soft);
+	color: var(--text);
 }
 
 .sidebar-session-pin-divider {
@@ -4359,10 +4379,10 @@ body.file-split-resizing #file-split-resize-handle::after {
 }
 
 .sidebar-session {
-	width: auto;
+	width: 100%;
 	flex: 1;
 	height: 30px;
-	padding: 0 6px;
+	padding: 0 52px 0 6px;
 	border: none;
 	border-radius: 6px;
 	background: transparent;
@@ -4376,12 +4396,12 @@ body.file-split-resizing #file-split-resize-handle::after {
 }
 
 .sidebar-session:hover {
-	background: var(--bg-soft);
+	background: transparent;
 	color: var(--text);
 }
 
 .sidebar-session.active-session {
-	background: var(--bg-soft);
+	background: transparent;
 	color: var(--text);
 }
 
@@ -4405,6 +4425,11 @@ body.file-split-resizing #file-split-resize-handle::after {
 	pointer-events: auto;
 }
 
+.sidebar-session-row:focus-within .sidebar-session-action {
+	opacity: 1;
+	pointer-events: auto;
+}
+
 .sidebar-session-action:hover {
 	background: var(--bg-soft);
 	color: var(--text);
@@ -4421,6 +4446,10 @@ body.file-split-resizing #file-split-resize-handle::after {
 }
 
 .sidebar-session-actions {
+	position: absolute;
+	right: 3px;
+	top: 50%;
+	transform: translateY(-50%);
 	display: inline-flex;
 	align-items: center;
 	gap: 2px;
@@ -4434,11 +4463,6 @@ body.file-split-resizing #file-split-resize-handle::after {
 
 .sidebar-session-action.pin.active {
 	color: var(--accent);
-}
-
-.sidebar-pinned-session-row .sidebar-session-action.pin {
-	opacity: 1;
-	pointer-events: auto;
 }
 
 .sidebar-pinned-section {
@@ -4490,6 +4514,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 	display: grid;
 	gap: 1px;
 	min-width: 0;
+	flex: 1;
 }
 
 .sidebar-pinned-session-project {
@@ -4527,6 +4552,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 }
 
 .sidebar-session-name {
+	flex: 1;
 	font-size: var(--font-size-task);
 	white-space: nowrap;
 	overflow: hidden;
@@ -4537,10 +4563,6 @@ body.file-split-resizing #file-split-resize-handle::after {
 
 /* fork 分支会话：嵌套在父会话下，缩进一级 + 分叉图标 */
 .sidebar-session-row--fork {
-	margin-left: 18px;
-}
-
-.sidebar-chrono-row--fork {
 	margin-left: 18px;
 	width: calc(100% - 18px);
 }
@@ -4586,76 +4608,53 @@ body.file-split-resizing #file-split-resize-handle::after {
 
 .sidebar-session-name.needs-attention {
 	font-weight: 600;
-	font-style: italic;
 	color: var(--text);
 }
 
-.sidebar-session-leading {
+.sidebar-session-status {
+	position: absolute;
+	right: 8px;
+	top: 50%;
+	transform: translateY(-50%);
 	width: 12px;
 	height: 12px;
 	flex-shrink: 0;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	margin-left: -16px;
+	border-radius: 50%;
+	display: inline-block;
+	transition: opacity 0.12s ease;
 }
 
-
-.sidebar-session-pi {
-	width: 12px;
-	height: 12px;
-	flex-shrink: 0;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	color: color-mix(in srgb, var(--text) 86%, var(--muted) 14%);
-	opacity: 0.94;
+.sidebar-session-row:hover .sidebar-session-status,
+.sidebar-session-row:focus-within .sidebar-session-status {
+	opacity: 0;
 }
 
-.sidebar-session-pi svg {
-	width: 11px;
-	height: 11px;
-	display: block;
-}
-
-.sidebar-session-pi path {
-	fill: currentColor;
-}
-
-.sidebar-session-pi.running {
+.sidebar-session-status.running {
+	box-sizing: border-box;
+	border: 1.8px solid color-mix(in srgb, var(--muted) 38%, transparent);
+	border-top-color: color-mix(in srgb, var(--text) 84%, var(--muted) 16%);
 	opacity: 1;
-	animation: pi-running-breath 5.4s ease-in-out infinite;
+	animation: sidebar-session-status-spin 0.85s linear infinite;
 }
 
-.sidebar-session-pi.suspended {
-	color: var(--muted);
-	opacity: 0.45;
-	animation: none;
+.sidebar-session-status.suspended {
+	box-sizing: border-box;
+	border: 1.5px solid color-mix(in srgb, var(--muted) 52%, transparent);
+	opacity: 0.7;
 }
 
-.sidebar-session-pi.completed,
-.sidebar-session-pi.failed {
-	opacity: 1;
-	animation: none;
+.sidebar-session-status.unread {
+	width: 8px;
+	height: 8px;
+	right: 10px;
+	background: #2f95f6;
+	box-shadow: 0 0 0 1px color-mix(in srgb, #2f95f6 18%, transparent);
 }
 
-.sidebar-session-pi.completed {
-	color: color-mix(in srgb, var(--text) 76%, var(--muted) 24%);
-}
-
-.sidebar-session-pi.failed {
-	color: var(--danger);
-}
-
-.sidebar-session-pi.completed circle,
-.sidebar-session-pi.completed path,
-.sidebar-session-pi.failed circle,
-.sidebar-session-pi.failed path {
-	fill: none;
-	stroke: currentColor;
-	stroke-width: 1.5;
-	stroke-linecap: round;
-	stroke-linejoin: round;
+@keyframes sidebar-session-status-spin {
+	to {
+		transform: translateY(-50%) rotate(360deg);
+	}
 }
 
 .sidebar-inline-input {
@@ -4694,7 +4693,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 .sidebar-chrono-row {
 	width: 100%;
 	height: 30px;
-	padding: 0 8px;
+	padding: 0 52px 0 8px;
 	border: none;
 	border-radius: 6px;
 	background: transparent;
@@ -4708,7 +4707,7 @@ body.file-split-resizing #file-split-resize-handle::after {
 
 .sidebar-chrono-row:hover,
 .sidebar-chrono-row.active-session {
-	background: var(--bg-soft);
+	background: transparent;
 	color: var(--text);
 }
 
@@ -6649,7 +6648,7 @@ markdown-block.markdown-content {
 }
 
 .model-picker-popover {
-	/* 渠道菜单保持紧凑；hover/focus 某个渠道后，模型作为独立子菜单向左展开。 */
+	/* 渠道菜单保持紧凑；二级菜单的方向和逐行锚点由布局函数实时计算。 */
 	right: 0;
 	display: grid;
 	grid-template-rows: minmax(0, 1fr) auto;
@@ -6660,6 +6659,7 @@ markdown-block.markdown-content {
 	height: 244px;
 	padding: 0;
 	overflow: visible;
+	z-index: 1202;
 }
 
 .model-picker-footer {
@@ -6819,18 +6819,26 @@ markdown-block.markdown-content {
 
 .model-picker-model-submenu {
 	position: absolute;
-	right: calc(100% + var(--model-picker-submenu-gap));
+	left: calc(100% + var(--model-picker-submenu-gap));
+	right: auto;
 	top: 0;
 	box-sizing: border-box;
 	width: min(var(--model-picker-submenu-width), calc(100vw - 16px));
 	height: auto;
-	min-height: 40px;
+	min-height: 0;
 	max-height: 244px;
 	border: 1px solid var(--border);
 	border-radius: 8px;
 	background: var(--bg-elev);
 	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-	z-index: 2;
+	z-index: 1;
+	overscroll-behavior: contain;
+}
+
+/* 小窗侧栏是 z-index:1100 的覆盖抽屉。模型菜单打开时把 composer 临时抬到
+   全局菜单层，两个菜单便作为一个整体浮在抽屉和聊天内容之上。 */
+.composer-shell:has(.model-picker-popover) {
+	z-index: 1201;
 }
 
 .model-picker-auth-hint {

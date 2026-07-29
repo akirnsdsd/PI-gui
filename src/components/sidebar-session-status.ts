@@ -1,22 +1,17 @@
-export type SessionRunOutcome = "completed" | "failed";
-
-export type SidebarSessionStatus = "running" | "suspended" | SessionRunOutcome | null;
+export type SidebarSessionStatus = "running" | "unread" | "suspended" | null;
 
 /**
- * One stable status owns the sidebar slot. Active execution wins, followed by
- * the latest settled outcome; process suspension is only an idle fallback.
+ * One stable status owns the sidebar slot. Active execution wins; once it
+ * settles, the blue dot is driven by unread/attention state rather than a
+ * permanent completed outcome. Process suspension is only an idle fallback.
  */
 export function resolveSidebarSessionStatus(
 	running: boolean,
 	suspended: boolean,
-	outcome: SessionRunOutcome | null,
+	unread: boolean,
 ): SidebarSessionStatus {
 	if (running) return "running";
-	if (outcome) return outcome;
+	if (unread) return "unread";
 	if (suspended) return "suspended";
 	return null;
-}
-
-export function normalizeSessionRunOutcome(value: unknown): SessionRunOutcome | null {
-	return value === "completed" || value === "failed" ? value : null;
 }
