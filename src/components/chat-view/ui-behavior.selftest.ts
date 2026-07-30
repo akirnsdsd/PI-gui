@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { mapBackendMessages } from "./backend-message-mapper.js";
 import {
 	collectAssistantWorkflow,
@@ -19,7 +21,9 @@ import { resolveSidebarSessionStatus } from "../sidebar-session-status.js";
 import {
 	INITIAL_SESSION_RUNTIME_LIFECYCLE,
 	isCurrentSessionRuntimeSettlement,
+	isSessionRuntimeAgentRunFenced,
 	isSessionRuntimeLifecycleProtected,
+	shouldRefuseSessionRuntimeReattach,
 	reduceSessionRuntimeLifecycle,
 	resolveSessionRuntimeEventSource,
 } from "../../runtime/session-runtime-lifecycle.js";
@@ -471,6 +475,30 @@ const runningTool: WorkflowToolCall = {
 			isSessionRuntimeLifecycleProtected("switching_session", INITIAL_SESSION_RUNTIME_LIFECYCLE) &&
 			isSessionRuntimeLifecycleProtected("creating_session", INITIAL_SESSION_RUNTIME_LIFECYCLE),
 	);
+	// 回归：冷启动/收养热备时 ensureRuntimeForSessionTab 会先把 phase 设成 starting，
+	// 随后的「不能切换所附着会话」守卫若读 phase 就会自我阻断（切会话必报
+	// 「仍在后台运行」）。运行围栏只看真实运行状态，不受中间态污染。
+	check(
+		"agent run fence ignores transition phases and tracks only real runs",
+		!isSessionRuntimeAgentRunFenced(INITIAL_SESSION_RUNTIME_LIFECYCLE) &&
+			isSessionRuntimeAgentRunFenced(started) &&
+			isSessionRuntimeAgentRunFenced(ended) &&
+			!isSessionRuntimeAgentRunFenced(failed),
+	);
+	// 回归钉子（commit 9407085）：重新附着会话/项目的拒绝判定绝不能读 phase。
+	// ensureRuntimeForSessionTab 在冷启动和收养热备时会先把 phase 设成 starting，
+	// 若守卫读 phase，切会话会自我阻断并必报「仍在后台运行」。
+	// 这条断言盯的是「守卫选了哪个判定」：把它改回
+	// isSessionRuntimeLifecycleProtected 会立即变红。
+	check(
+		"session reattach refusal never reads transition phases",
+		!["idle", "starting", "switching_session", "creating_session", "ready", "failed"].some((phase) =>
+			shouldRefuseSessionRuntimeReattach(phase as Parameters<typeof shouldRefuseSessionRuntimeReattach>[0], INITIAL_SESSION_RUNTIME_LIFECYCLE),
+		) &&
+			shouldRefuseSessionRuntimeReattach("starting", started) &&
+			shouldRefuseSessionRuntimeReattach("ready", ended) &&
+			!shouldRefuseSessionRuntimeReattach("failed", failed),
+	);
 	check(
 		"settled event remains owned by its original runtime after switching threads",
 		resolveSessionRuntimeEventSource("runtime-a", "runtime-b") === "background" &&
@@ -526,6 +554,42 @@ const runningTool: WorkflowToolCall = {
 			"research-notes-final.md",
 			(value, length) => value.slice(0, length),
 		) === "research-notes-final.md",
+	);
+}
+
+{
+	// 源码契约检查（commit 9407085 回归防护的第二道阁）。
+	//
+	// 上面的纯函数断言只能保证判定本身不读 phase，抵不住真正的回归形式：
+	// 有人直接把调用点改回 isSessionRuntimeProtected。那种改动类型兼容、tsc 不报错，
+	// 但会让冷启动/收养热备时切会话确定性误报「仍在后台运行」。
+	//
+	// 因为没有前端测试框架（ensureRuntimeForSessionTab 是带真实进程启停的 async
+	// 函数，无法在 node 里跑），这里退一步直接断言源码：两处报「仍在后台运行」
+	// 的 throw 之前，守卫必须调 isSessionRuntimeAgentRunning。
+	// bundle 输出在 node_modules/.cache，不能用 import.meta.url 推源码位置；
+	// npm run test:ui 从 app/ 目录执行，从 cwd 解析。
+	const mainSource = readFileSync(resolve(process.cwd(), "src/main.ts"), "utf-8");
+	const guardedThrows = [
+		"当前线程仍在后台运行，不能把它的 runtime 切换到另一个项目",
+		"当前线程仍在后台运行，不能切换它所附着的会话",
+	];
+	const guardResults = guardedThrows.map((message) => {
+		const throwIndex = mainSource.indexOf(message);
+		if (throwIndex < 0) return { message, found: false, guarded: false };
+		// 只看 throw 之前的一小段，避免误匹配到别处的调用。
+		const preceding = mainSource.slice(Math.max(0, throwIndex - 240), throwIndex);
+		return {
+			message,
+			found: true,
+			guarded: preceding.includes("isSessionRuntimeAgentRunning(runtime)") &&
+				!preceding.includes("isSessionRuntimeProtected(runtime)"),
+		};
+	});
+	check(
+		"background-run refusals in main.ts are guarded by the agent run fence, not phase protection",
+		guardResults.every((result) => result.found && result.guarded),
+		guardResults,
 	);
 }
 

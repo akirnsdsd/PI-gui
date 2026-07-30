@@ -3316,7 +3316,9 @@ body.file-split-resizing #file-split-resize-handle::after {
 	grid-template-columns: 1fr auto;
 	gap: 8px;
 	align-items: center;
-	padding: 12px 8px 10px;
+	/* 底部收紧到 6px：指示线没有 rail 托底，靠贴近下方列表来表明「这条线管着这段内容」。
+	   与 .sidebar-panel-body 的 8px 上边距合计 14px。 */
+	padding: 12px 8px 6px;
 }
 
 .sidebar-mode-meta {
@@ -3325,20 +3327,22 @@ body.file-split-resizing #file-split-resize-handle::after {
 	min-width: 0;
 }
 
+/* 会话/文件切换：底部指示线风格。不用灰底胶囊（segmented control），
+   与侧边栏其他无边框元素保持一致。 */
 .sidebar-mode-switch {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	gap: 3px;
+	gap: 2px;
 	min-width: 0;
 	width: fit-content;
 	max-width: 100%;
 	justify-self: start;
 	align-self: center;
-	padding: 3px;
-	border-radius: 999px;
+	padding: 0;
+	border-radius: 0;
 	border: none;
-	background: var(--bg-muted);
+	background: transparent;
 }
 
 .sidebar-mode-current {
@@ -3434,29 +3438,54 @@ body.file-split-resizing #file-split-resize-handle::after {
 }
 
 .sidebar-mode-btn {
+	position: relative;
 	height: 28px;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	gap: 5px;
-	padding: 0 10px;
-	border-radius: 999px;
+	/* 9px 与 .sidebar-mode-current 的 padding-left 对齐，落在侧栏同一条文字轴上。 */
+	padding: 0 9px;
 	border: none;
+	border-radius: 6px 6px 0 0;
 	background: transparent;
 	color: var(--muted);
 	cursor: pointer;
 	flex-shrink: 0;
 	font-size: 12px;
-	transition: background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+	/* 500：与 composer 的 trigger 同级，读作 chrome 标签而不是正文。
+	   激活态不加粗，避免两个 tab 之间来回抽动。 */
+	font-weight: 500;
+	transition: color 120ms ease;
+}
+
+/* 指示线：常驻但默认透明，避开 active 切换时的布局抽动。 */
+.sidebar-mode-btn::after {
+	content: "";
+	position: absolute;
+	left: 9px;
+	right: 9px;
+	bottom: 0;
+	height: 2px;
+	border-radius: 2px 2px 0 0;
+	background: var(--accent);
+	opacity: 0;
+	transition: opacity 140ms ease;
 }
 
 .sidebar-mode-btn-label {
 	line-height: 1;
 }
 
+/* 只换文字色，不给底色：底色会把刚拆掉的胶囊以 tab 形状重新画回来，
+   而且和下面那条 hover 指示线重复表达同一件事。 */
 .sidebar-mode-btn:hover {
-	background: var(--bg-soft);
 	color: var(--text);
+}
+
+/* hover 非激活项时给一条淡指示线作为可点击提示，不与激活态混淆。 */
+.sidebar-mode-btn:hover:not(.active)::after {
+	opacity: 0.28;
 }
 
 .sidebar-top-action-btn:hover,
@@ -3468,9 +3497,24 @@ body.file-split-resizing #file-split-resize-handle::after {
 }
 
 .sidebar-mode-btn.active {
-	background: var(--bg-soft);
 	color: var(--text);
-	box-shadow: none;
+}
+
+.sidebar-mode-btn.active::after {
+	opacity: 1;
+}
+
+/* 激活项的图标压暗一档：让指示线和标签承担「激活」信号，
+   否则 15px 描边图标会和 2px 指示线抢视觉重量。 */
+.sidebar-mode-btn.active .sidebar-mode-svg {
+	stroke: color-mix(in srgb, var(--text) 74%, var(--muted));
+}
+
+/* 键盘焦点环。无底色的 tab 只靠文字色区分，必须补一个可见焦点。
+   必须写在 .active 之后：同特异性下后者生效，否则激活项聚焦时拿不到环。 */
+.sidebar-mode-btn:focus-visible {
+	outline: none;
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 44%, transparent);
 }
 
 .sidebar-mode-svg {
@@ -8018,6 +8062,33 @@ markdown-block.markdown-content {
 	#sidebar-collapse-toggle,
 	#sidebar-collapse-toggle.hidden {
 		display: grid;
+		/* 必须低于 #sidebar-container（1100）：抽屉展开后要把这个按钮连同命中区一起
+		   盖住。它坐在 left:8px，正好压在抽屉自己的红黄绿交通灯上，若留在上层
+		   （旧值 1101）交通灯就点不到。 */
+		z-index: 1099;
+		transition: opacity 140ms ease;
+	}
+
+	/* 抽屉展开时隐掉左上角这个 toggle（抽屉内部右上角已经有收起按钮）。
+	   用 opacity 而不是 display/visibility：抽屉靠 hover 这个按钮展开，元素一旦不可
+	   命中，hover 就丢，抽屉立即收回→按钮重现→再展开，变成闪烁死循环。
+	   保留元素后，hover 的交接由几何驱动：抽屉滑到盖住指针的那一帧，
+	   #sidebar-collapse-toggle:hover 转假与 #sidebar-container:hover 转真同时发生，
+	   两者在同一个选择器列表里，所以不会出现一帧都不命中的空隙。 */
+	.content-shell:has(#sidebar-collapse-toggle:hover) #sidebar-collapse-toggle,
+	.content-shell:has(#sidebar-collapse-toggle:focus-visible) #sidebar-collapse-toggle,
+	.content-shell.compact-sidebar-open #sidebar-collapse-toggle,
+	.content-shell:has(#sidebar-container:hover) #sidebar-collapse-toggle,
+	.content-shell:has(#sidebar-container:focus-within) #sidebar-collapse-toggle {
+		opacity: 0;
+	}
+
+	/* 但键盘焦点必须可见（WCAG 2.4.7）：焦点落在本按钮上时豁免隐藏，并抬到
+	   抽屉之上，否则 Tab 过来时焦点环被抽屉盖死，键盘用户不知道自己在哪。
+	   与「抽屉展开时隐掉它」不矛盾：:focus-visible 只在键盘导航时匹配，
+	   鼠标 hover/点开抽屉的路径不会命中，也就不会重新压住交通灯。 */
+	.content-shell:has(#sidebar-collapse-toggle:focus-visible) #sidebar-collapse-toggle:focus-visible {
+		opacity: 1;
 		z-index: 1101;
 	}
 
@@ -8096,7 +8167,12 @@ markdown-block.markdown-content {
 	}
 
 	.thinking-select-trigger {
-		padding-inline: 8px;
+		/* 只收紧左侧。右侧的 20px 是基础样式给绝对定位的 caret
+		   （.thinking-select-caret：right 6px + 16px 字号）留的位，不能动。
+		   必须用 padding-left 长形式：写 padding / padding-inline 简写会把右侧
+		   一起覆掉，caret 就压到档位文字上。同类结构（padding 给 absolute
+		   子元素留位）在响应式断点里一律用单边长形式覆写。 */
+		padding-left: 8px;
 	}
 
 	.send-btn {

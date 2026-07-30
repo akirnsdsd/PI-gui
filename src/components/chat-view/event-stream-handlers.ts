@@ -2,6 +2,23 @@ import { t } from "../../i18n/index.js";
 
 type NoticeKind = "info" | "success" | "error";
 
+/**
+ * 进行中工具输出的保留上限。长时间运行的工具（子智能体、大部头命令）可能推出
+ * 几十 MB 文本；完整保留在内存里并参与每帧 diff 既无意义也会拖死渲染。
+ * 保尾不保头：流式过程中用户关心的是最新进展；收尾的完整结果仍由
+ * tool_execution_end 的 result 接管。
+ */
+const STREAMING_TOOL_OUTPUT_MAX_CHARS = 200_000;
+
+/** 压缩进度明细的条数上限（每条已限 220 字符，但条数原本无限）。 */
+const COMPACTION_DETAIL_MAX_ENTRIES = 200;
+
+function clampStreamingToolOutput(text: string): string {
+	if (text.length <= STREAMING_TOOL_OUTPUT_MAX_CHARS) return text;
+	const kept = text.slice(text.length - STREAMING_TOOL_OUTPUT_MAX_CHARS);
+	return `${t("timeline.tool.streamingOutputTruncated")}\n${kept}`;
+}
+
 interface ToolCallLike {
 	id: string;
 	name: string;
@@ -44,6 +61,12 @@ interface HandleMessageStreamEventContext {
 	findMostRecentRunningToolByName: (name: string) => ToolCallLike | null;
 	attachOrphanToolResult: (toolName: string, output: string, isError: boolean) => void;
 	render: () => void;
+	/**
+	 * 高频流式事件专用的节流渲染（rAF 合帧 + 最小间隔）。
+	 * 只用于 delta / tool 进度这类可以掉帧的更新；状态转折点（开始/结束/错误）
+	 * 仍用 render() 立即落地，否则会看到滞后的终态。
+	 */
+	scheduleStreamRender: () => void;
 	scrollToBottom: () => void;
 	extractRuntimeErrorMessage: (event: Record<string, unknown> | null | undefined) => string;
 	extractAssistantPartialContent: (assistantEvent: Record<string, unknown>, mode: "text" | "thinking") => string | null;
@@ -79,6 +102,8 @@ interface HandleCompactionAndRetryEventContext {
 	setRetryStatus: (status: string) => void;
 	appendSystemMessage: (text: string, options?: { idPrefix?: string }) => void;
 	render: () => void;
+	/** 同 HandleMessageStreamEventContext.scheduleStreamRender，供高频压缩进度使用。 */
+	scheduleStreamRender: () => void;
 }
 
 function readPath(source: Record<string, unknown>, path: string): unknown {
@@ -203,7 +228,7 @@ export function handleMessageStreamEvent(
 					context.markAssistantTextObserved();
 				}
 				context.scheduleStreamingUiReconcile(1800);
-				context.render();
+				context.scheduleStreamRender();
 				context.scrollToBottom();
 				return true;
 			}
@@ -215,7 +240,9 @@ export function handleMessageStreamEvent(
 				assistant.thinking = context.mergeStreamingText(currentThinking, partialThinking, assistantEvent.delta);
 				assistant.isThinkingStreaming = true;
 				context.scheduleStreamingUiReconcile(1800);
-				if ((assistant.thinking?.length || 0) % 100 === 0) context.render();
+				// 旧写法是「length % 100 === 0 才渲染」：取模很容易永不命中（单次增量不是 1 字符时
+				// 会跳过 100 的倍数），思考文本会整段不刷。改成时间维度的真节流。
+				context.scheduleStreamRender();
 				return true;
 			}
 
@@ -313,10 +340,14 @@ export function handleMessageStreamEvent(
 			const partialText = context.extractToolOutput(partialResult);
 			if (partialText) {
 				const currentOutput = tool.streamingOutput ?? tool.result ?? "";
-				tool.streamingOutput = context.mergeStreamingText(currentOutput, partialText, partialResult.delta);
+				tool.streamingOutput = clampStreamingToolOutput(
+					context.mergeStreamingText(currentOutput, partialText, partialResult.delta),
+				);
 			}
 			tool.isRunning = true;
-			context.render();
+			// 进行中的工具输出用节流渲染：有些工具（典型如 subagent 扩展）每次 onUpdate
+			// 发的是累积全量文本，直连 render() 会随输出长度退化成 O(n²) 并卡死窗口。
+			context.scheduleStreamRender();
 			context.scrollToBottom();
 			return true;
 		}
@@ -387,9 +418,16 @@ export function handleCompactionAndRetryEvent(
 				const cleaned = context.truncate(detail.replace(/\s+/g, " ").trim(), 220);
 				if (cleaned && compactionCycle.details[compactionCycle.details.length - 1] !== cleaned) {
 					compactionCycle.details.push(cleaned);
+					// 列表上限：details 的每一条都来自外部事件，只限单条 220 字符不限条数
+					// 等于没设上限。丢最早的：压缩进度里用户关心的是最新几步。
+					if (compactionCycle.details.length > COMPACTION_DETAIL_MAX_ENTRIES) {
+						compactionCycle.details.splice(0, compactionCycle.details.length - COMPACTION_DETAIL_MAX_ENTRIES);
+					}
 				}
 			}
-			context.render();
+			// 压缩进度是高频且可丢帧的：同 tool_execution_update 一样走节流，
+			// 压缩的开始/结束转折点仍用 render() 立即落地。
+			context.scheduleStreamRender();
 			return true;
 		}
 

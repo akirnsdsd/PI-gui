@@ -66,6 +66,10 @@ export default {
 		loadEarlierFailed: "加载更早消息失败",
 		truncatedMarker: "…（已截断 {kb} KB）",
 	},
+	tool: {
+		/** 进行中的工具输出超过保留上限时的头部标记（只保尾）。 */
+		streamingOutputTruncated: "…（输出过长，仅显示最新部分）",
+	},
 	retry: {
 		waiting: "{seconds}s 后重试（第 {attempt}/{max} 次）",
 		unknownFailure: "未知重试错误",

@@ -75,6 +75,8 @@ export default {
 		createProjectSession: "创建项目会话失败",
 		switchSession: "切换会话失败",
 		switchSessionAfterDelete: "删除会话后切换失败",
+		/** 把底层 error message 拼到笼统文案后：这些 catch 都是 catch-all，不带原文时用户无法自查。 */
+		withReason: "{message}：{reason}",
 	},
 	sessions: {
 		addProjectFirst: "请先添加或选择一个项目，再创建新会话",

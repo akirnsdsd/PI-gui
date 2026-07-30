@@ -40,6 +40,7 @@ import { t } from "./i18n/index.js";
 import {
 	isCurrentSessionRuntimeSettlement,
 	isSessionRuntimeLifecycleProtected,
+	shouldRefuseSessionRuntimeReattach,
 	reduceSessionRuntimeLifecycle,
 	resolveSessionRuntimeEventSource,
 	type SessionRuntimeLifecycleSignal,
@@ -741,6 +742,31 @@ function isSessionRuntimeProtected(runtime: SessionRuntime | null | undefined): 
 		uiRunning: runtime.running,
 		awaitingAgentSettled: runtime.awaitingAgentSettled,
 	});
+}
+
+/**
+ * 只问「这个 runtime 上是不是真的有 agent 在跑」。用于那些要向用户报「仍在后台运行」
+ * 的拒绝路径；绝不能用 isSessionRuntimeProtected 代替——后者把 starting/
+ * switching_session/creating_session 也算作受保护，而那些 phase 往往是调用方
+ * 自己刚设进去的，拿来做守卫会变成自我阻断。
+ */
+function isSessionRuntimeAgentRunning(runtime: SessionRuntime | null | undefined): boolean {
+	if (!runtime) return false;
+	return shouldRefuseSessionRuntimeReattach(runtime.phase, {
+		uiRunning: runtime.running,
+		awaitingAgentSettled: runtime.awaitingAgentSettled,
+	});
+}
+
+/**
+ * 把底层 error message 拼到笼统文案后。这些失败路径都是 catch-all，只报一句
+ * 「XX 失败」时用户和开发者都无法定位（真因只进了 console）。
+ */
+function formatErrorNotice(baseMessage: string, err: unknown): string {
+	const reason = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+	const trimmed = reason.trim();
+	if (!trimmed) return baseMessage;
+	return t("app.errors.withReason", { message: baseMessage, reason: trimmed.slice(0, 200) });
 }
 
 function cancelPendingRuntimeSettlement(runtime: SessionRuntime): void {
@@ -2411,11 +2437,25 @@ async function reloadActiveWorkspaceRuntime(): Promise<boolean> {
 	syncActiveChatRuntimeBinding(workspace, { forceReset: true, statusText: t("app.status.reloadingRuntime") });
 
 	let failed = false;
+	// 本流程在 ensureRuntimeForSessionTab 之外自己把 phase 设成 starting，却不具备它的
+	// catch 收尾（那边失败会落到 failed）。若 stop() 期间任务版本失效，
+	// StaleProjectTaskError 会被队列静默吃掉，这个 starting 就永久留在 runtime 上：
+	// 广义保护会判它不可复用、不可回收，并让配置重载无限推迟。
+	let stoppedRuntime: SessionRuntime | null = null;
+	const recoverStoppedRuntimePhase = (): void => {
+		if (!stoppedRuntime) return;
+		if (stoppedRuntime.phase === "starting" && !stoppedRuntime.bridge.isConnected) {
+			stoppedRuntime.phase = "failed";
+			recordDebugTrace(`reload-runtime:phase-recovered instance=${stoppedRuntime.instanceId}`);
+			syncDebugOverlay();
+		}
+	};
 	await queueProjectTask(
 		async (version) => {
 			assertProjectTaskCurrent(version);
 			const runtime = getRuntimeForTab(workspace.id, activeSession.id);
 			if (runtime?.bridge.isConnected) {
+				stoppedRuntime = runtime;
 				runtime.phase = "starting";
 				await runtime.bridge.stop().catch(() => {
 					/* ignore */
@@ -2440,10 +2480,20 @@ async function reloadActiveWorkspaceRuntime(): Promise<boolean> {
 		},
 		(err) => {
 			failed = true;
+			recoverStoppedRuntimePhase();
 			console.error("Failed to reload runtime:", err);
-			chatView?.notify(t("app.errors.reloadRuntime"), "error");
+			chatView?.notify(formatErrorNotice(t("app.errors.reloadRuntime"), err), "error");
 		},
-		{ label: "slash-reload-runtime" },
+		{
+			label: "slash-reload-runtime",
+			// 任务被丢弃（用户在 stop() 期间又切了会话/项目）时，reload 并未完成：
+			// 除了恢复 phase，还必须报 failed，否则会向 /reload 和配置重载链路谎报成功，
+			// 后者会误以为新配置已生效。
+			onDiscarded: () => {
+				failed = true;
+				recoverStoppedRuntimePhase();
+			},
+		},
 	);
 
 	return !failed;
@@ -3803,7 +3853,10 @@ async function runEnsureRuntimeForSessionTab(
 	const projectChanged = normalizeProjectPath(runtime.projectPath) !== normalizeProjectPath(projectPath);
 	const configStale = bridge.isConnected && runtime.configRevision < runtimeConfigRevision;
 	const replacementProtected = (projectChanged || configStale) && isSessionRuntimeProtected(runtime);
-	if (projectChanged && replacementProtected) {
+	// 两种「不能现在替换」要分开判：replacementProtected 包含 starting/
+	// switching_session 等中间态，适合做「先别重启，等它安定下来」的编排判断；
+	// 但它不代表后台真有任务，所以向用户报「仍在后台运行」并拒绝时只能用运行围栏。
+	if (projectChanged && isSessionRuntimeAgentRunning(runtime)) {
 		throw new Error("当前线程仍在后台运行，不能把它的 runtime 切换到另一个项目");
 	}
 	runtime.projectPath = projectPath;
@@ -3900,7 +3953,7 @@ async function runEnsureRuntimeForSessionTab(
 		if (resumeSessionPath) {
 			const targetSessionPath = resumeSessionPath;
 			if (normalizeSessionPath(targetSessionPath) !== normalizeSessionPath(runtime.lastKnownSessionPath)) {
-				if (isSessionRuntimeProtected(runtime)) {
+				if (isSessionRuntimeAgentRunning(runtime)) {
 					throw new Error("当前线程仍在后台运行，不能切换它所附着的会话");
 				}
 				runtime.phase = "switching_session";
@@ -4819,7 +4872,7 @@ async function initialize(): Promise<void> {
 				(err) => {
 					console.error("Startup workspace activation failed:", err);
 					recordDebugTrace(`startup-activation-error: ${err instanceof Error ? err.message : String(err)}`);
-					chatView?.notify(t("app.errors.restoreWorkspaceRuntime"), "error");
+					chatView?.notify(formatErrorNotice(t("app.errors.restoreWorkspaceRuntime"), err), "error");
 				},
 				{ label: "startup-activate-workspace" },
 			);
@@ -5172,7 +5225,7 @@ function activateProjectSession(
 		},
 		(err) => {
 			console.error("Failed to switch session:", err);
-			chatView?.notify(t("app.errors.switchSession"), "error");
+			chatView?.notify(formatErrorNotice(t("app.errors.switchSession"), err), "error");
 			options?.onFailed?.(err);
 		},
 		{ label: options?.label ?? "session-select" },
@@ -5689,7 +5742,7 @@ function renderApp(): void {
 				},
 				(err) => {
 					console.error("Failed to switch content-tab session:", err);
-					chatView?.notify(t("app.errors.switchSessionTab"), "error");
+					chatView?.notify(formatErrorNotice(t("app.errors.switchSessionTab"), err), "error");
 				},
 			);
 		});
@@ -5826,7 +5879,7 @@ function renderApp(): void {
 				},
 				(err) => {
 					console.error("Failed to switch after closing session tab:", err);
-					chatView?.notify(t("app.errors.switchSessionTab"), "error");
+					chatView?.notify(formatErrorNotice(t("app.errors.switchSessionTab"), err), "error");
 				},
 			);
 		});
@@ -6141,7 +6194,7 @@ function renderApp(): void {
 				},
 				(err) => {
 					console.error("Failed to switch project session:", err);
-					chatView?.notify(t("app.errors.switchProject"), "error");
+					chatView?.notify(formatErrorNotice(t("app.errors.switchProject"), err), "error");
 				},
 				{ label: "sidebar-project-select" },
 			);
@@ -6168,7 +6221,7 @@ function renderApp(): void {
 			},
 			(err) => {
 				console.error("Failed to switch project:", err);
-				chatView?.notify(t("app.errors.switchProject"), "error");
+				chatView?.notify(formatErrorNotice(t("app.errors.switchProject"), err), "error");
 			},
 			{ label: "sidebar-project-select" },
 		);
@@ -6198,7 +6251,7 @@ function renderApp(): void {
 			},
 			(err) => {
 				console.error("Failed to create project session:", err);
-				chatView?.notify(t("app.errors.createProjectSession"), "error");
+				chatView?.notify(formatErrorNotice(t("app.errors.createProjectSession"), err), "error");
 			},
 			{ label: "sidebar-new-session" },
 		);
@@ -6371,7 +6424,7 @@ function renderApp(): void {
 			},
 			(err) => {
 				console.error("Failed to switch session after delete:", err);
-				chatView?.notify(t("app.errors.switchSessionAfterDelete"), "error");
+				chatView?.notify(formatErrorNotice(t("app.errors.switchSessionAfterDelete"), err), "error");
 			},
 		);
 	});

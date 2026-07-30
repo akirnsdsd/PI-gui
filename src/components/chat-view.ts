@@ -290,6 +290,12 @@ const ATTACHMENT_MAX_FILES = 10;
 const ATTACHMENT_MAX_FILE_BYTES = 10 * 1024 * 1024;
 const ATTACHMENT_MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 
+/**
+ * 流式渲染最小间隔。高频 tool/assistant 增量事件下将渲染降到 ~12fps；
+ * 人眼对流式文本的连续感在这个量级仍然成立，主线程却能留出响应输入的余量。
+ */
+const STREAM_RENDER_MIN_INTERVAL_MS = 80;
+
 function uid(prefix = "id"): string {
 	return `${prefix}_${Math.random().toString(36).slice(2, 8)}_${Date.now().toString(36)}`;
 }
@@ -629,6 +635,12 @@ export class ChatView {
 	private workflowElapsedTimer: ReturnType<typeof setInterval> | null = null;
 	private disconnectNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 	private streamingReconcileTimer: ReturnType<typeof setTimeout> | null = null;
+	/** 高频流式事件的合帧渲染句柄（见 scheduleStreamRender）。 */
+	private streamRenderRaf: number | null = null;
+	private streamRenderLastAt = 0;
+	private streamRenderTimer: ReturnType<typeof setTimeout> | null = null;
+	/** scrollToBottom 的合帧句柄（高频流式事件下避免堆积 rAF + 同步布局）。 */
+	private scrollToBottomRaf: number | null = null;
 	private composerResizeObserver: ResizeObserver | null = null;
 	private observedComposerElement: HTMLElement | null = null;
 	private composerOffsetPx = 196;
@@ -1870,6 +1882,64 @@ export class ChatView {
 		}
 	}
 
+	/**
+	 * 流式事件的节流渲染。
+	 *
+	 * 背景：tool_execution_update / assistant 增量这类事件可能以每秒几十上百条的
+	 * 频率到达，而有些工具（典型如 subagent 扩展）的 onUpdate 载荷是「累积到当前
+	 * 的全量文本」而不是增量。直连 render() 会变成 O(n²)：输出越长，每条 update
+	 * 要 diff 的模板越大，主线程被打满，整个窗口失去响应。
+	 *
+	 * 策略：rAF 合帧 + 最小间隔。同一帧内的多次请求合为一次；超过帧预算时按
+	 * STREAM_RENDER_MIN_INTERVAL_MS 降频。注意这里不能改 render() 本体：它有很多
+	 * 调用方渲染后立即读 DOM（测尺寸、定位弹层），异步化会造成读到旧布局。
+	 */
+	private scheduleStreamRender(): void {
+		if (this.streamRenderRaf !== null || this.streamRenderTimer !== null) return;
+
+		const flush = (): void => {
+			this.streamRenderRaf = null;
+			this.streamRenderTimer = null;
+			this.streamRenderLastAt = Date.now();
+			this.render();
+		};
+
+		const sinceLast = Date.now() - this.streamRenderLastAt;
+		if (sinceLast >= STREAM_RENDER_MIN_INTERVAL_MS) {
+			this.streamRenderRaf = requestAnimationFrame(flush);
+			return;
+		}
+		this.streamRenderTimer = setTimeout(() => {
+			this.streamRenderTimer = null;
+			this.streamRenderRaf = requestAnimationFrame(flush);
+		}, STREAM_RENDER_MIN_INTERVAL_MS - sinceLast);
+	}
+
+	/** 流结束/切会话时丢掉未落地的节流帧，避免它在新状态上多渲染一次。 */
+	private cancelStreamRender(): void {
+		if (this.streamRenderRaf !== null) {
+			cancelAnimationFrame(this.streamRenderRaf);
+			this.streamRenderRaf = null;
+		}
+		if (this.streamRenderTimer !== null) {
+			clearTimeout(this.streamRenderTimer);
+			this.streamRenderTimer = null;
+		}
+	}
+
+	/**
+	 * 只在组件销毁时调：丢掉未落地的滚动帧。
+	 * 不能并入 cancelStreamRender——后者在流结束时也会调，而那些调用方只补 render()
+	 * 不补 scrollToBottom()，在那里取消会直接丢掉流的最后一次滚到底。
+	 * 窗口转后台时 rAF 会暂停，旧 ChatView 可能被保留到恢复之后，届时这个回调
+	 * 会去操作已经不归它的滚动容器。
+	 */
+	private cancelPendingScrollFrame(): void {
+		if (this.scrollToBottomRaf === null) return;
+		cancelAnimationFrame(this.scrollToBottomRaf);
+		this.scrollToBottomRaf = null;
+	}
+
 	private scheduleStreamingUiReconcile(delayMs = 1800): void {
 		if (this.streamingReconcileTimer) {
 			clearTimeout(this.streamingReconcileTimer);
@@ -1964,6 +2034,8 @@ export class ChatView {
 		this.unsubscribeEvents?.();
 		this.unsubscribeEvents = null;
 		this.cancelStreamingUiReconcile();
+		this.cancelStreamRender();
+		this.cancelPendingScrollFrame();
 		this.runHasAssistantText = false;
 		this.runSawToolActivity = false;
 		this.keepWorkflowExpandedUntilAssistantText = false;
@@ -3102,6 +3174,7 @@ export class ChatView {
 				findMostRecentRunningToolByName: this.findMostRecentRunningToolByName.bind(this),
 				attachOrphanToolResult: this.attachOrphanToolResult.bind(this),
 				render: this.render.bind(this),
+				scheduleStreamRender: this.scheduleStreamRender.bind(this),
 				scrollToBottom: this.scrollToBottom.bind(this),
 				extractRuntimeErrorMessage: this.extractRuntimeErrorMessage.bind(this),
 				extractAssistantPartialContent: this.extractAssistantPartialContent.bind(this),
@@ -3136,6 +3209,7 @@ export class ChatView {
 				},
 				appendSystemMessage: this.appendSystemMessage.bind(this),
 				render: this.render.bind(this),
+				scheduleStreamRender: this.scheduleStreamRender.bind(this),
 			})
 		) {
 			return;
@@ -4335,6 +4409,8 @@ export class ChatView {
 
 	private clearStreamingUiState(): void {
 		this.cancelStreamingUiReconcile();
+		// 丢掉未落地的节流帧：它持有的是旧流的中间态，在新状态上渲染会闪一下旧内容。
+		this.cancelStreamRender();
 		this.clearWorkingStatusTimer(true);
 		if (this.state) {
 			this.state = { ...this.state, isStreaming: false };
@@ -4930,7 +5006,12 @@ export class ChatView {
 	private scrollToBottom(force = false): void {
 		const shouldFollow = force || this.autoFollowChat;
 		if (!shouldFollow) return;
-		requestAnimationFrame(() => {
+		// 合帧：流式事件每条都调这里，旧写法每次单独排一个 rAF，高频下同一帧里
+		// 堆出几十上百个回调，每个都读 scrollHeight 触发同步布局。渲染已经降频了，
+		// 滚动也必须跟上，否则 layout 成为新的主线程瓶颈。
+		if (this.scrollToBottomRaf !== null) return;
+		this.scrollToBottomRaf = requestAnimationFrame(() => {
+			this.scrollToBottomRaf = null;
 			if (!this.scrollContainer) return;
 			this.scrollContainer.scrollTop = this.scrollContainer.scrollHeight;
 		});
