@@ -14,6 +14,7 @@ import {
 	subtractBlockedThinkingLevels,
 } from "./desktop-ui-behavior.js";
 import { openImageLightbox } from "./image-lightbox.js";
+import { TodoPanel, parseTodoDetails, type TodoItem } from "./todo-panel.js";
 import {
 	type PiAuthProviderStatus,
 	type RpcImageInput,
@@ -660,6 +661,17 @@ export class ChatView {
 	private streamRenderTimer: ReturnType<typeof setTimeout> | null = null;
 	/** scrollToBottom 的合帧句柄（高频流式事件下避免堆积 rAF + 同步布局）。 */
 	private scrollToBottomRaf: number | null = null;
+	/**
+	 * Todo 面板（composer 上方的任务条）。
+	 * 数据源是 `todo` 扩展的结构化 details，不解析 setWidget 的纯文本。
+	 * 没装扩展时永不出现（todos 为空就不渲染）。
+	 */
+	private todoPanel: TodoPanel | null = null;
+	private todoPanelSlot: HTMLElement | null = null;
+	/** 清单的权威副本（面板重建时靠它恢复）。 */
+	private todoItems: TodoItem[] = [];
+	/** 面板重建时携带的视图态（展开/关闭）。 */
+	private todoViewState = { expanded: false, dismissed: false };
 	private composerResizeObserver: ResizeObserver | null = null;
 	private observedComposerElement: HTMLElement | null = null;
 	private composerOffsetPx = 196;
@@ -894,6 +906,10 @@ export class ChatView {
 		this.isConnected = rpcBridge.isConnected;
 		this.state = null;
 		this.messages = [];
+		// todo 清单是会话级状态：必须在此处清。不能只依赖
+		// rebuildTodoStateFromBackend——它只在刷新成功后跑，而且切到一个没有 todo
+		// 记录的会话时，旧清单会在刷新完成前一直挂在新会话的 composer 上。
+		this.resetTodoState();
 		this.lastBackendSessionFile = null;
 		this.lastBackendRefreshError = null;
 		this.pendingDeliveryMode = "prompt";
@@ -1913,6 +1929,83 @@ export class ChatView {
 	 * STREAM_RENDER_MIN_INTERVAL_MS 降频。注意这里不能改 render() 本体：它有很多
 	 * 调用方渲染后立即读 DOM（测尺寸、定位弹层），异步化会造成读到旧布局。
 	 */
+	/**
+	 * 把 TodoPanel 绑到每次渲染后的插槽上。
+	 *
+	 * lit 重渲染会重用 DOM 节点，但不保证同一个引用；节点换了就重建面板
+	 * 并把已有清单重新写回，否则面板会突然变空。
+	 */
+	private syncTodoPanelMount(): void {
+		const slot = this.container.querySelector<HTMLElement>("#todo-panel-slot");
+		if (!slot) {
+			this.todoPanel = null;
+			return;
+		}
+		if (this.todoPanelSlot === slot && this.todoPanel) {
+			this.todoPanel.render();
+			return;
+		}
+		this.todoPanelSlot = slot;
+		// 插槽节点被 lit 换掉时面板要重建，但用户的展开/关闭选择不能因此丢失。
+		const carriedViewState = this.todoPanel?.exportViewState() ?? this.todoViewState;
+		const panel = new TodoPanel(slot, (state) => {
+			this.todoViewState = state;
+		});
+		panel.restoreViewState(carriedViewState);
+		if (this.todoItems.length > 0) panel.setTodos(this.todoItems);
+		// setTodos 在内容变化时会重置 dismissed（有新任务就应该重新出现），
+		// 重建场景下内容未变，所以这里再把视图态盖回去。
+		panel.restoreViewState(carriedViewState);
+		this.todoPanel = panel;
+		panel.render();
+	}
+
+	/**
+	 * 从工具结果的 details 里提取清单。由两条路径调：
+	 * - 运行中：`tool_execution_end` 事件；
+	 * - 切会话/重载：`get_messages` 的 toolResult 回放。
+	 */
+	private applyTodoDetails(details: unknown): void {
+		const parsed = parseTodoDetails(details);
+		if (!parsed) return;
+		this.todoItems = parsed;
+		this.todoPanel?.setTodos(parsed);
+	}
+
+	/** 切会话时清空：清单是会话级状态，绝不能串到另一个会话。 */
+	private resetTodoState(): void {
+		this.todoItems = [];
+		this.todoViewState = { expanded: false, dismissed: false };
+		this.todoPanel?.reset();
+	}
+
+	/**
+	 * 从后端消息回放重建清单。
+	 *
+	 * 两个关键约束：
+	 *
+	 * 1. **不能用 mapBackendMessages 的结果**——它丢掉了 `details`（只保留文本），
+	 *    所以这里扫原始消息。清单本身是全量快照，所以最后一条 toolResult 即最终态。
+	 *
+	 * 2. **找不到时绝不清空。** `backendMessages` 只是 `getSessionPage(..., 40)` 的
+	 *    尾页，不是全量历史。最后一次 todo 调用一旦被后续 40 条 entry 挤出去，
+	 *    这里就看不到它了——此时若清空面板，长会话里清单会无故消失。
+	 *    切会话的真正清空在 setSession 里做（resetTodoState），不靠这里。
+	 */
+	private rebuildTodoStateFromBackend(backendMessages: Array<Record<string, unknown>>): void {
+		let latest: unknown = null;
+		for (const message of backendMessages) {
+			if (message.role !== "toolResult") continue;
+			if (message.toolName !== "todo") continue;
+			if ("details" in message) latest = message.details;
+		}
+		if (latest === null) return;
+		const parsed = parseTodoDetails(latest);
+		if (!parsed) return;
+		this.todoItems = parsed;
+		this.todoPanel?.setTodos(parsed);
+	}
+
 	private scheduleStreamRender(): void {
 		if (this.streamRenderRaf !== null || this.streamRenderTimer !== null) return;
 
@@ -2130,6 +2223,9 @@ export class ChatView {
 			this.lastBackendRefreshError = null;
 			this.onStateChange?.(state);
 			this.messages = this.mapBackendMessages(backendMessages);
+			// 从会话历史重建 todo 清单：`details` 会落盘进 session JSONL，
+			// 所以切会话/重载后面板能恢复。按时间序回放，最后一条胜出。
+			this.rebuildTodoStateFromBackend(backendMessages);
 			if (this.compactionInsertIndex !== null) {
 				this.compactionInsertIndex = Math.max(0, Math.min(this.compactionInsertIndex, this.messages.length));
 			}
@@ -3276,6 +3372,7 @@ export class ChatView {
 				attachOrphanToolResult: this.attachOrphanToolResult.bind(this),
 				render: this.render.bind(this),
 				scheduleStreamRender: this.scheduleStreamRender.bind(this),
+				onToolDetails: (_toolName, details) => this.applyTodoDetails(details),
 				scrollToBottom: this.scrollToBottom.bind(this),
 				extractRuntimeErrorMessage: this.extractRuntimeErrorMessage.bind(this),
 				extractAssistantPartialContent: this.extractAssistantPartialContent.bind(this),
@@ -4587,6 +4684,7 @@ export class ChatView {
 		try {
 			await rpcBridge.newSession();
 			this.messages = [];
+			this.resetTodoState();
 			await this.refreshFromBackend();
 			this.pushNotice(t("chatView.session.started"), "success");
 			return true;
@@ -5125,6 +5223,9 @@ export class ChatView {
 		const composer = this.container.querySelector<HTMLElement>(".composer-shell");
 		if (!this.projectPath || !composer) {
 			chatRoot.style.setProperty("--composer-offset", "196px");
+			// 同步到 :root：扩展 widget 槽位是 fixed 且挂在 body 上，继承不到
+			// .chat-root 上的变量。
+			document.documentElement.style.setProperty("--composer-offset", "196px");
 			this.composerOffsetPx = 196;
 			this.composerResizeObserver?.disconnect();
 			this.composerResizeObserver = null;
@@ -5137,6 +5238,7 @@ export class ChatView {
 			if (Math.abs(measured - this.composerOffsetPx) < 2) return;
 			this.composerOffsetPx = measured;
 			chatRoot.style.setProperty("--composer-offset", `${measured}px`);
+			document.documentElement.style.setProperty("--composer-offset", `${measured}px`);
 			if (this.autoFollowChat) this.scrollToBottom();
 		};
 
@@ -6044,6 +6146,10 @@ export class ChatView {
 		return html`
 			<div class="composer-shell">
 				<div class="composer-inner">
+					<!-- Todo 面板：在 DOM 上真正位于 composer 上方，由 flex 定位。
+					     不用 extension-ui-handler 那两个 fixed 容器（它们硬编码
+					     bottom-[132px] left-[278px] 猜侧边栏宽度和 composer 高度）。 -->
+					<div id="todo-panel-slot" class="hidden-pane"></div>
 					${renderQueuedComposerMessagesView(this.queuedComposerMessages, truncate)}
 					${this.renderComposerPanel()}
 
@@ -6216,6 +6322,7 @@ export class ChatView {
 		render(template, this.container);
 		this.relocateExtStatusSlot();
 		this.scrollContainer = this.container.querySelector("#chat-scroll");
+		this.syncTodoPanelMount();
 		this.updateComposerOffset();
 	}
 

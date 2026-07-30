@@ -11913,3 +11913,214 @@ kbd {
 	background: color-mix(in srgb, var(--muted) 14%, transparent);
 	color: var(--muted);
 }
+
+/* ---------------------------------------------------------------------------
+   Todo 面板：composer 上方的任务条（对标 Codex 桌面 App）。
+   数据来自 todo 扩展的结构化 details，没装扩展时整块不渲染。
+   位置由 flex 决定（在 .composer-inner 内），不用 fixed 猜像素。
+   --------------------------------------------------------------------------- */
+
+.todo-panel {
+	margin-bottom: 8px;
+	padding: 8px 10px 9px;
+	border-radius: 10px;
+	border: 1px solid var(--border);
+	background: color-mix(in srgb, var(--bg-elev) 88%, transparent);
+	backdrop-filter: blur(8px);
+	font-size: 12px;
+	pointer-events: auto;
+}
+
+.todo-panel-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.todo-panel-toggle {
+	appearance: none;
+	border: none;
+	background: transparent;
+	padding: 0;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+	color: var(--text);
+	font-size: 12px;
+	flex-shrink: 0;
+}
+
+.todo-panel-caret {
+	color: var(--muted);
+	font-size: 9px;
+	transition: transform 140ms var(--ease-enter);
+}
+
+.todo-panel-caret.is-open {
+	transform: rotate(90deg);
+}
+
+.todo-panel-title {
+	font-weight: 500;
+}
+
+.todo-panel-count {
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+}
+
+/* 进度条占据中间弹性空间，让计数与关闭按钮分列两端 */
+.todo-panel-progress {
+	flex: 1;
+	min-width: 24px;
+	height: 3px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--text) 10%, transparent);
+	overflow: hidden;
+}
+
+.todo-panel-progress-fill {
+	height: 100%;
+	border-radius: 999px;
+	background: var(--accent);
+	transition: width 220ms var(--ease-enter);
+}
+
+.todo-panel.is-complete .todo-panel-progress-fill {
+	background: var(--success);
+}
+
+.todo-panel-dismiss {
+	appearance: none;
+	border: none;
+	background: transparent;
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 15px;
+	line-height: 1;
+	padding: 0 2px;
+	flex-shrink: 0;
+}
+
+.todo-panel-dismiss:hover {
+	color: var(--text);
+}
+
+.todo-panel-list {
+	list-style: none;
+	margin: 7px 0 0;
+	padding: 0;
+	display: grid;
+	gap: 3px;
+	/* 展开时上限 200 条：不设高度上限的话 composer 会长到几千像素，
+	   把标题栏和关闭按钮顶出视口。 */
+	max-height: min(38vh, 320px);
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+.todo-panel-item {
+	display: flex;
+	align-items: baseline;
+	gap: 7px;
+	color: var(--text);
+	line-height: 1.45;
+}
+
+.todo-panel-mark {
+	flex-shrink: 0;
+	width: 11px;
+	color: var(--muted);
+	font-size: 11px;
+}
+
+.todo-panel-item.is-done .todo-panel-mark {
+	color: var(--success);
+}
+
+/* 已完成项降级但不用 line-through：删除线在中文里可读性很差 */
+.todo-panel-item.is-done .todo-panel-text {
+	color: var(--muted-2);
+}
+
+.todo-panel-text {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.todo-panel-more {
+	appearance: none;
+	border: none;
+	background: transparent;
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 11px;
+	padding: 5px 0 0 18px;
+}
+
+.todo-panel-more:hover {
+	color: var(--text);
+}
+
+.todo-panel-toggle:focus-visible,
+.todo-panel-dismiss:focus-visible,
+.todo-panel-more:focus-visible {
+	outline: none;
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 44%, transparent);
+	border-radius: 5px;
+}
+
+/* 通用扩展 widget 槽位（ctx.ui.setWidget）。
+   旧实现是 fixed + 硬编码 bottom-[132px] left-[278px]，猜侧边栏宽度与 composer
+   高度，侧边栏折叠或 composer 长高就错位。这里改用 CSS 变量跟随实际侧边栏宽度，
+   并用 --composer-offset 跟随实际 composer 高度（该变量由 chat-view 实测写入）。
+   注意：小窗口下侧边栏变成浮层抽屉、不占流，故左偏移归零。 */
+.extension-widget-slot {
+	position: fixed;
+	/* 用 --workspace-topbar-offset 而不是 --sidebar-width：后者在侧边栏折叠时
+	   仍是展开宽度（折叠只把 #sidebar-container 实际宽度设为 0），会让 widget
+	   左侧悬空一大块。前者由 applyWorkspaceTopbarOffset 按折叠态写 0。 */
+	left: calc(var(--workspace-topbar-offset, 320px) + 12px);
+	right: 16px;
+	z-index: 30;
+	pointer-events: none;
+}
+
+.extension-widget-slot > * {
+	pointer-events: auto;
+}
+
+.extension-widget-above {
+	bottom: calc(var(--composer-offset, 196px) + 8px);
+}
+
+.extension-widget-below {
+	bottom: 12px;
+}
+
+/* 非聊天 pane（设置/包管理等）没有 composer，fixed widget 必须收起 */
+.extension-widget-slot.pane-hidden {
+	display: none;
+}
+
+@media (max-width: 760px) {
+	.extension-widget-slot {
+		left: 12px;
+	}
+}
+
+/* 读屏专用文本：视觉上不可见但仍在无障碍树里。
+   用于 todo 单项的完成状态——✓/○ 是 aria-hidden 的装饰字符，
+   状态不能只靠它和颜色表达。 */
+.sr-only-text {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
+}

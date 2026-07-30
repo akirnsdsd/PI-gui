@@ -149,9 +149,15 @@ export class SubagentsSettings {
 		return invoke<T>(cmd, args);
 	}
 
-	/** 面板每次打开时调。 */
+	/**
+	 * 面板每次打开时调。
+	 *
+	 * **不预加载 runs**：它最坏要解析 100 个每个 512KB 上限的 result.json，
+	 * 而用户大多数时候只看定义 tab。改成切到 runs tab 时惰加载。
+	 */
 	async refresh(): Promise<void> {
-		await Promise.all([this.loadDefinitions(), this.loadRuns()]);
+		await this.loadDefinitions();
+		if (this.activeTab === "runs") await this.loadRuns();
 	}
 
 	private async loadDefinitions(): Promise<void> {
@@ -407,6 +413,8 @@ export class SubagentsSettings {
 					this.activeTab = id;
 					this.notice = "";
 					this.requestRender();
+					// 惰加载：首次切到 runs 才读目录。
+					if (id === "runs" && !this.runs && !this.runsLoading) void this.loadRuns();
 				}}
 			>
 				${label}

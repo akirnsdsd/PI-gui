@@ -295,6 +295,10 @@ export class ExtensionUiHandler {
 		if (!active) {
 			this.closeMcpPanel();
 		}
+		// widget 槽位是 fixed 定位，不跟随 pane 切换。不显式隐藏的话，它会浮在
+		// 设置页/包管理页之上，而那些页面根本没有 composer。
+		this.widgetAboveContainer?.classList.toggle("pane-hidden", !active);
+		this.widgetBelowContainer?.classList.toggle("pane-hidden", !active);
 		this.renderStatus();
 	}
 
@@ -600,15 +604,20 @@ export class ExtensionUiHandler {
 		this.mcpPanelContainer.className = "hidden fixed bottom-[60px] left-[292px] z-50";
 		document.body.appendChild(this.mcpPanelContainer);
 
-		// Widget containers
+		// Widget 容器。
+		// 这两个容器用 fixed + 硬编码偏移猜侧边栏宽度和 composer 高度，侧边栏折叠、
+		// 小窗口或 composer 长高时都会错位。保留它们是为了不让任意扩展的 setWidget
+		// 直接消失，但新增的结构化面板（如 todo）应该在 DOM 里真正居于 composer 上方
+		// 由 flex 定位，参见 src/components/todo-panel.ts。
+		// 左侧偏移改用 CSS 变量跟随实际侧边栏宽度，至少不再写死 278px。
 		this.widgetAboveContainer = document.createElement("div");
 		this.widgetAboveContainer.id = "widget-above";
-		this.widgetAboveContainer.className = "hidden fixed bottom-[132px] left-[278px] right-4 z-30";
+		this.widgetAboveContainer.className = "hidden extension-widget-slot extension-widget-above";
 		document.body.appendChild(this.widgetAboveContainer);
 
 		this.widgetBelowContainer = document.createElement("div");
 		this.widgetBelowContainer.id = "widget-below";
-		this.widgetBelowContainer.className = "hidden fixed bottom-3 left-[278px] right-4 z-30";
+		this.widgetBelowContainer.className = "hidden extension-widget-slot extension-widget-below";
 		document.body.appendChild(this.widgetBelowContainer);
 	}
 
@@ -1187,12 +1196,20 @@ export class ExtensionUiHandler {
 	}
 
 	private setWidget(request: ExtensionUiRequest): void {
+		// todo 清单已由 GUI 原生面板渲染（src/components/todo-panel.ts，读结构化 details）。
+		// 扩展同时会推一份纯文本给 TUI，在 GUI 里必须忽略，否则会和面板重复展示。
+		if (request.widgetKey === "todo-list") return;
 		const container =
 			request.widgetPlacement === "belowEditor" ? this.widgetBelowContainer : this.widgetAboveContainer;
 		if (!container) return;
 
 		const lines = (request.widgetLines ?? [])
-			.map((line) => sanitizeUiStatusText(line))
+			// widgetLines 来自用户自装的扩展，不可信：
+			// - 非字符串会在 sanitizeUiStatusText 的 .replace() 处抛错；
+			// - 极大数组或超长单行会直接冻界面。
+			.filter((line): line is string => typeof line === "string")
+			.slice(0, 24)
+			.map((line) => sanitizeUiStatusText(line.length > 400 ? `${line.slice(0, 400)}…` : line))
 			.filter((line) => Boolean(line) && !shouldSuppressUiStatusText(line));
 		if (lines.length === 0) {
 			container.classList.add("hidden");

@@ -67,6 +67,8 @@ interface HandleMessageStreamEventContext {
 	 * 仍用 render() 立即落地，否则会看到滞后的终态。
 	 */
 	scheduleStreamRender: () => void;
+	/** 工具结果携带结构化 details 时的回调（目前只用于 todo 清单）。 */
+	onToolDetails?: (toolName: string, details: unknown) => void;
 	scrollToBottom: () => void;
 	extractRuntimeErrorMessage: (event: Record<string, unknown> | null | undefined) => string;
 	extractAssistantPartialContent: (assistantEvent: Record<string, unknown>, mode: "text" | "thinking") => string | null;
@@ -367,6 +369,11 @@ export function handleMessageStreamEvent(
 			} else if (result && typeof result === "object") {
 				const content = context.extractToolOutput(result);
 				tool.result = content || t("timeline.tools.noOutput");
+				// todo 扩展把完整清单放在 result.details 里（结构化，带 done 状态），
+				// 比解析 setWidget 的纯文本可靠。交由上层解析。
+				if (tool.name === "todo") {
+					context.onToolDetails?.(tool.name, (result as Record<string, unknown>).details);
+				}
 			} else {
 				tool.result = tool.result || t("timeline.tools.noOutput");
 			}

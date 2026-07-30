@@ -19,6 +19,7 @@ import {
 	toggleCompactSidebarOverlay,
 } from "../desktop-ui-behavior.js";
 import { formatPendingFileDisplayName } from "./composer-fragments-view.js";
+import { parseTodoDetails } from "../todo-panel.js";
 import { resolveSidebarSessionStatus } from "../sidebar-session-status.js";
 import {
 	INITIAL_SESSION_RUNTIME_LIFECYCLE,
@@ -637,6 +638,41 @@ const runningTool: WorkflowToolCall = {
 			const source: string[] = ["off", "high"];
 			const result = subtractBlockedThinkingLevels(source, undefined);
 			return result !== source && JSON.stringify(result) === JSON.stringify(source);
+		})(),
+	);
+}
+
+{
+	// todo 面板的数据来自用户可改的扩展（~/.pi/agent/extensions/todo.ts），
+	// 所以解析必须宽容：字段缺失/类型不对时返回 null，绝不抛错崩掉整个 composer。
+	const ok = parseTodoDetails({ action: "add", todos: [{ id: 1, text: "a", done: false }, { id: 2, text: "b", done: true }] });
+	check(
+		"todo details: 正常结构解析出 id/text/done",
+		ok !== null && ok.length === 2 && ok[1].done === true && ok[0].text === "a",
+		ok,
+	);
+	check("todo details: 非对象返回 null", parseTodoDetails(null) === null && parseTodoDetails("x") === null);
+	check("todo details: todos 不是数组返回 null", parseTodoDetails({ todos: "nope" }) === null);
+	check(
+		"todo details: 跳过缺 id 或 text 的坏条目而不是整体失败",
+		(() => {
+			const r = parseTodoDetails({ todos: [{ id: 1, text: "keep" }, { text: "no id" }, { id: 3 }, null] });
+			return r !== null && r.length === 1 && r[0].text === "keep";
+		})(),
+	);
+	check(
+		"todo details: done 只认真正的 true（防 truthy 字符串误判为已完成）",
+		(() => {
+			const r = parseTodoDetails({ todos: [{ id: 1, text: "a", done: "yes" }] });
+			return r !== null && r[0].done === false;
+		})(),
+	);
+	check(
+		"todo details: 条目数与文本长度都有上限（外部数据不可信）",
+		(() => {
+			const many = Array.from({ length: 500 }, (_, i) => ({ id: i, text: "x".repeat(1000) }));
+			const r = parseTodoDetails({ todos: many });
+			return r !== null && r.length === 200 && r[0].text.length <= 301;
 		})(),
 	);
 }
