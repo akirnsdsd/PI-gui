@@ -672,6 +672,15 @@ export class ChatView {
 	private todoItems: TodoItem[] = [];
 	/** 面板重建时携带的视图态（展开/关闭）。 */
 	private todoViewState = { expanded: false, dismissed: false };
+	/** 最近一次分页读取带回的 todo 快照（Rust 侧全文件扇描得到）。 */
+	private pendingTodoSnapshot: unknown = null;
+	/**
+	 * 实时 todo 更新的代次。
+	 *
+	 * 刷新是 async 的：`refreshFromBackend` 读历史页期间，`tool_execution_end`
+	 * 可能已经写入了更新的清单。若不记代次，较旧的历史快照会把它盖回去。
+	 */
+	private todoLiveGeneration = 0;
 	private composerResizeObserver: ResizeObserver | null = null;
 	private observedComposerElement: HTMLElement | null = null;
 	private composerOffsetPx = 196;
@@ -1968,6 +1977,8 @@ export class ChatView {
 	private applyTodoDetails(details: unknown): void {
 		const parsed = parseTodoDetails(details);
 		if (!parsed) return;
+		// 实时更新总是比历史快照新：递增代次，让在途刷新的结果作废。
+		this.todoLiveGeneration += 1;
 		this.todoItems = parsed;
 		this.todoPanel?.setTodos(parsed);
 	}
@@ -1993,13 +2004,17 @@ export class ChatView {
 	 *    切会话的真正清空在 setSession 里做（resetTodoState），不靠这里。
 	 */
 	private rebuildTodoStateFromBackend(backendMessages: Array<Record<string, unknown>>): void {
-		let latest: unknown = null;
-		for (const message of backendMessages) {
-			if (message.role !== "toolResult") continue;
-			if (message.toolName !== "todo") continue;
-			if ("details" in message) latest = message.details;
+		// 优先用 Rust 侧全文件扇描得到的快照；没有（旧版后端或 get_messages
+		// 回退路径）才退而扫手里这批消息。
+		let latest: unknown = this.pendingTodoSnapshot;
+		if (latest === null || latest === undefined) {
+			for (const message of backendMessages) {
+				if (message.role !== "toolResult") continue;
+				if (message.toolName !== "todo") continue;
+				if ("details" in message) latest = message.details;
+			}
 		}
-		if (latest === null) return;
+		if (latest === null || latest === undefined) return;
 		const parsed = parseTodoDetails(latest);
 		if (!parsed) return;
 		this.todoItems = parsed;
@@ -2179,6 +2194,9 @@ export class ChatView {
 			generation !== this.refreshGeneration || requestInstanceId !== rpcBridge.getInstanceId();
 		const startedAt = Date.now();
 		push?.(`chat:refreshFromBackend start instance=${requestInstanceId} gen=${generation}`);
+		// 刷新开始时快照 todo 代次：读历史页期间若有实时更新到达，
+		// 历史快照就已过时，不能拿它覆盖。
+		const todoGenerationAtStart = this.todoLiveGeneration;
 		try {
 			const state = await rpcBridge.getState();
 			if (isStale()) {
@@ -2225,7 +2243,9 @@ export class ChatView {
 			this.messages = this.mapBackendMessages(backendMessages);
 			// 从会话历史重建 todo 清单：`details` 会落盘进 session JSONL，
 			// 所以切会话/重载后面板能恢复。按时间序回放，最后一条胜出。
-			this.rebuildTodoStateFromBackend(backendMessages);
+			if (this.todoLiveGeneration === todoGenerationAtStart) {
+				this.rebuildTodoStateFromBackend(backendMessages);
+			}
 			if (this.compactionInsertIndex !== null) {
 				this.compactionInsertIndex = Math.max(0, Math.min(this.compactionInsertIndex, this.messages.length));
 			}
@@ -2351,6 +2371,7 @@ export class ChatView {
 		this.historyHasMore = false;
 		this.historyOldestEntryId = null;
 		if (!sessionFile) {
+			this.pendingTodoSnapshot = null;
 			return rpcBridge.getMessages();
 		}
 		try {
@@ -2359,9 +2380,13 @@ export class ChatView {
 			if (isStale?.()) return [];
 			this.historyHasMore = page.hasMore;
 			this.historyOldestEntryId = page.oldestEntryId;
+			// 尾页里可能没有 todo 调用（长会话会把它挤出去），所以用 Rust 侧
+			// 全文件扇描得到的快照。这是清单能从长会话恢复的唯一保证。
+			this.pendingTodoSnapshot = page.latestTodoDetails ?? null;
 			return this.adaptSessionPageEntries(page.entries);
 		} catch (err) {
 			console.warn("get_session_page failed, falling back to get_messages:", err);
+			this.pendingTodoSnapshot = null;
 			return rpcBridge.getMessages();
 		}
 	}

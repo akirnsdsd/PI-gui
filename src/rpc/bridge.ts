@@ -205,6 +205,14 @@ export interface SessionPageResult {
 	entries: Array<Record<string, unknown>>;
 	hasMore: boolean;
 	oldestEntryId: string | null;
+	/**
+	 * 会话里最后一个 `todo` 工具结果的 details 快照。
+	 *
+	 * `entries` 只是尾页，长会话里最后一次 todo 调用很容易被挤出去，
+	 * 所以 Rust 侧在同一次流式扇描里单独带出它，供 todo 面板恢复全量状态。
+	 * 旧版后端不带此字段，故为可选。
+	 */
+	latestTodoDetails?: unknown;
 }
 
 export interface RpcCompatibilityReport {

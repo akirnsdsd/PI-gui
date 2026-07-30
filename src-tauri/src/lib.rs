@@ -2235,6 +2235,33 @@ struct SessionPage {
     entries: Vec<serde_json::Value>,
     has_more: bool,
     oldest_entry_id: Option<String>,
+    /// 会话里**最后一个** `todo` 工具结果的 details 快照。
+    ///
+    /// 为什么要它：`entries` 只是尾页（默认 40 条），而 todo 清单面板需要全量
+    /// 状态。长会话里最后一次 todo 调用很容易被后续 entry 挤出尾页，前端就无法
+    /// 恢复清单。本字段在同一次流式扇描里顺便记住，不额外读文件。
+    ///
+    /// 只保留 details 本身（已经过 truncate_large_strings），不带整条 entry。
+    latest_todo_details: Option<serde_json::Value>,
+}
+
+/// 从一条 timeline entry 里提取 `todo` 工具结果的 details。
+///
+/// 会话 JSONL 的形状是 `{type:"message", message:{role:"toolResult", toolName:"todo", details:{...}}}`。
+/// 字段缺失或类型不对时返回 None——清单来自用户可改的扩展，不能假设形状。
+fn extract_todo_details(entry: &serde_json::Value) -> Option<serde_json::Value> {
+    let message = entry.get("message")?;
+    if message.get("role").and_then(|v| v.as_str()) != Some("toolResult") {
+        return None;
+    }
+    if message.get("toolName").and_then(|v| v.as_str()) != Some("todo") {
+        return None;
+    }
+    let details = message.get("details")?;
+    if !details.is_object() {
+        return None;
+    }
+    Some(details.clone())
 }
 
 /// Entry types the chat timeline can render (mirrors what pi's
@@ -2310,6 +2337,8 @@ fn load_session_page(
 
     let mut ring: VecDeque<serde_json::Value> = VecDeque::with_capacity(limit + 1);
     let mut dropped = 0_usize;
+    // 跟着扇描记住最后一个 todo 快照，不受尾页窗口限制。
+    let mut latest_todo_details: Option<serde_json::Value> = None;
     let mut line = String::new();
     loop {
         line.clear();
@@ -2344,6 +2373,9 @@ fn load_session_page(
                 obj.insert("truncated".to_string(), serde_json::Value::Bool(true));
             }
         }
+        if let Some(details) = extract_todo_details(&entry) {
+            latest_todo_details = Some(details);
+        }
         ring.push_back(entry);
         if ring.len() > limit {
             ring.pop_front();
@@ -2361,6 +2393,7 @@ fn load_session_page(
         entries,
         has_more: dropped > 0,
         oldest_entry_id,
+        latest_todo_details,
     })
 }
 
@@ -5322,6 +5355,91 @@ mod tests {
             std::process::id()
         ));
         assert!(load_session_page(missing.to_str().unwrap(), None, None).is_err());
+    }
+
+    fn todo_result_line(id: &str, todos_json: &str) -> String {
+        format!(
+            "{{\"type\":\"message\",\"id\":\"{}\",\"parentId\":null,\"timestamp\":\"2026-07-25T10:00:01Z\",\"message\":{{\"role\":\"toolResult\",\"toolName\":\"todo\",\"content\":[{{\"type\":\"text\",\"text\":\"ok\"}}],\"details\":{{\"action\":\"add\",\"todos\":{},\"nextId\":9}}}}}}",
+            id, todos_json
+        )
+    }
+
+    /// 回归：todo 清单必须能从长会话恢复。
+    ///
+    /// 尾页只有 40 条，而清单面板需要全量状态。若只靠 entries 里找 todo，
+    /// 最后一次调用被后续 entry 挤出后面板就空了。
+    #[test]
+    fn session_page_keeps_todo_snapshot_beyond_tail_window() {
+        let root = temp_sessions_dir("page_todo_snapshot");
+        let path = root.join("s.jsonl");
+        let mut lines = vec![session_header("/Users/demo/x", "2026-07-25T10:00:00Z")];
+        // todo 调用在很前面
+        lines.push(todo_result_line(
+            "todo1",
+            "[{\"id\":1,\"text\":\"alpha\",\"done\":true},{\"id\":2,\"text\":\"beta\",\"done\":false}]",
+        ));
+        // 后面推 60 条，远超默认 40 条尾页窗口
+        for i in 0..60 {
+            lines.push(paged_message_line(&format!("m{}", i), "user", "x"));
+        }
+        write_lines(&path, &lines);
+
+        let page = load_session_page(path.to_str().unwrap(), None, None).unwrap();
+        // todo entry 确实已不在尾页里
+        assert!(!page_entry_ids(&page).contains(&"todo1".to_string()));
+        // 但快照必须带出来
+        let details = page
+            .latest_todo_details
+            .as_ref()
+            .expect("快照必须存在，否则长会话无法恢复清单");
+        let todos = details.get("todos").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0].get("text").and_then(|v| v.as_str()), Some("alpha"));
+        assert_eq!(todos[0].get("done").and_then(|v| v.as_bool()), Some(true));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 多次 todo 调用时只保留最后一个（清单是全量快照，不是增量）。
+    #[test]
+    fn session_page_todo_snapshot_takes_the_last_one() {
+        let root = temp_sessions_dir("page_todo_last");
+        let path = root.join("s.jsonl");
+        let lines = vec![
+            session_header("/Users/demo/x", "2026-07-25T10:00:00Z"),
+            todo_result_line("t1", "[{\"id\":1,\"text\":\"old\",\"done\":false}]"),
+            todo_result_line("t2", "[{\"id\":1,\"text\":\"new\",\"done\":true}]"),
+        ];
+        write_lines(&path, &lines);
+
+        let page = load_session_page(path.to_str().unwrap(), None, None).unwrap();
+        let todos = page
+            .latest_todo_details
+            .as_ref()
+            .unwrap()
+            .get("todos")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(todos[0].get("text").and_then(|v| v.as_str()), Some("new"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 没有 todo 记录时快照为 None，不能凭空造一个。
+    #[test]
+    fn session_page_todo_snapshot_absent_without_todo_calls() {
+        let root = temp_sessions_dir("page_todo_none");
+        let path = root.join("s.jsonl");
+        let lines = vec![
+            session_header("/Users/demo/x", "2026-07-25T10:00:00Z"),
+            paged_message_line("m0", "user", "hi"),
+        ];
+        write_lines(&path, &lines);
+
+        let page = load_session_page(path.to_str().unwrap(), None, None).unwrap();
+        assert!(page.latest_todo_details.is_none());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
