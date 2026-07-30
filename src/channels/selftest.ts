@@ -1565,6 +1565,20 @@ function savedDraft(
 		patterns: ["openai/gpt-4o:low", "anthropic/claude-sonnet-4-5"],
 	});
 
+	// `max` 是 pi 的合法档位（VALID_THINKING_LEVELS 共 7 项）。漏了它的话
+	// `*:max` 里的 `:max` 不会被识别为 suffix，glob 就匹配不到任何模型，
+	// 于是该规则被原封保留而不展开——与 pi 的 parseModelPattern 行为不一致。
+	const maxThinkingGlob = mergeProviderModelScope({
+		provider: "anthropic",
+		providerModelIds: ["claude-opus-4-6", "claude-sonnet-4-5"],
+		selectedIds: ["claude-sonnet-4-5"],
+		allKnownModels: known,
+		existingPatterns: ["*:max"],
+	});
+	eq("scope: max 后缀的 glob 与 xhigh 同样展开", maxThinkingGlob, {
+		patterns: ["openai/gpt-5.4:max", "openai/gpt-4o:max", "anthropic/claude-sonnet-4-5"],
+	});
+
 	// 裸 id：唯一归属本 provider 时移除，归属其它 provider 时保留
 	const bare = mergeProviderModelScope({
 		provider: "anthropic",

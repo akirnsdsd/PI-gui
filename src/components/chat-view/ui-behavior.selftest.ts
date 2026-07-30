@@ -11,7 +11,9 @@ import {
 	resolveInlineTitleKeyAction,
 	resolveModelPickerSubmenuPlacement,
 	resolveSessionRefreshScrollAction,
+	resolveThinkingLevelOptions,
 	resolveViewportPopoverLeft,
+	subtractBlockedThinkingLevels,
 	shouldRollbackSessionTitle,
 	shouldRestoreInlineTitleRename,
 	toggleCompactSidebarOverlay,
@@ -590,6 +592,52 @@ const runningTool: WorkflowToolCall = {
 		"background-run refusals in main.ts are guarded by the agent run fence, not phase protection",
 		guardResults.every((result) => result.found && result.guarded),
 		guardResults,
+	);
+}
+
+{
+	// 思考程度档位的三态解析。pi 的可用档位由模型的 reasoning / thinkingLevelMap 决定
+	// （xhigh 与 max 必须显式声明），所以「未知」绝不能退化成「全部可用」——
+	// 那会在 reasoning:false 或基础档被 null 禁用的模型上给出整片假选项。
+	check(
+		"thinking options: 未知时只给当前档，不猜模型能力",
+		JSON.stringify(resolveThinkingLevelOptions(null, "max")) === JSON.stringify(["max"]),
+		resolveThinkingLevelOptions(null, "max"),
+	);
+	check(
+		"thinking options: 权威空列表仍保留当前档以免菜单空白",
+		JSON.stringify(resolveThinkingLevelOptions([], "off")) === JSON.stringify(["off"]),
+		resolveThinkingLevelOptions([], "off"),
+	);
+	check(
+		"thinking options: 权威列表原样透出",
+		JSON.stringify(resolveThinkingLevelOptions(["off", "high", "max"], "high")) ===
+			JSON.stringify(["off", "high", "max"]),
+	);
+	check(
+		"thinking options: 当前档不在权威列表时补进去（刚切模型/列表陈旧）",
+		JSON.stringify(resolveThinkingLevelOptions(["max", "xhigh"], "medium")) ===
+			JSON.stringify(["max", "xhigh", "medium"]),
+	);
+
+	// 权威列表与反应式 blocked 的合并：前者可能陈旧（配置重启后模型能力会变），
+	// 后者是从真实夹取结果学到的。
+	check(
+		"thinking blocked: 未知态原样透传，保持三态不塌成两态",
+		subtractBlockedThinkingLevels(null, new Set(["high"])) === null,
+	);
+	check(
+		"thinking blocked: 减去已知被夹取的档",
+		JSON.stringify(subtractBlockedThinkingLevels(["off", "high", "max"], new Set(["max"]))) ===
+			JSON.stringify(["off", "high"]),
+	);
+	check(
+		"thinking blocked: 无 blocked 时返回副本而非原引用",
+		(() => {
+			const source: string[] = ["off", "high"];
+			const result = subtractBlockedThinkingLevels(source, undefined);
+			return result !== source && JSON.stringify(result) === JSON.stringify(source);
+		})(),
 	);
 }
 

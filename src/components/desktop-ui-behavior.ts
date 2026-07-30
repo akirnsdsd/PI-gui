@@ -140,3 +140,40 @@ export function resolveModelPickerSubmenuPlacement({
 		top: Math.max(0, anchorTop - popoverTop),
 	};
 }
+
+/**
+ * 思考程度档位的三态解析。
+ *
+ * pi 的可用档位由 `getSupportedThinkingLevels(model)` 决定（pi-ai models.js）：
+ * `reasoning: false` 的模型只有 `off`；`thinkingLevelMap[level] = null` 的档被禁用；
+ * `xhigh` / `max` 必须在 map 里显式出现才可用。所以 GUI 绝不能凭空假设档位集合。
+ *
+ * 三态语义：
+ * - `authoritative === null`：尚未拿到权威列表（未拉取/在途/失败）。**不猜**，
+ *   只给当前已生效的那一档——它是唯一确定可用的（pi 已经接受了它）。
+ * - `authoritative === []`：pi 明确说一档也不可用。仍保留当前档以免菜单空白。
+ * - 非空：权威列表；若当前档不在其中（刚切模型、列表陈旧），补进去以免下拉
+ *   显示不出正在生效的值。
+ */
+export function resolveThinkingLevelOptions<T extends string>(
+	authoritative: readonly T[] | null,
+	current: T,
+): T[] {
+	if (authoritative === null || authoritative.length === 0) return [current];
+	return authoritative.includes(current) ? [...authoritative] : [...authoritative, current];
+}
+
+/**
+ * 权威列表减去本地已知被夹取过的档。
+ *
+ * 权威缓存可能陈旧（配置受控重启后模型能力可能变），而 `blocked` 是从真实夹取
+ * 结果学到的，两者要合并。`null` 表示未知，直接原样透传保持三态。
+ */
+export function subtractBlockedThinkingLevels<T extends string>(
+	authoritative: readonly T[] | null,
+	blocked: ReadonlySet<T> | null | undefined,
+): T[] | null {
+	if (authoritative === null) return null;
+	if (!blocked || blocked.size === 0) return [...authoritative];
+	return authoritative.filter((level) => !blocked.has(level));
+}

@@ -34,6 +34,8 @@ export default {
 			medium: "中",
 			high: "高",
 			xhigh: "极高",
+			/** pi 的 max 档（Maximum reasoning）。 */
+			max: "最大",
 		},
 		stopGeneration: "停止生成",
 		sending: "发送中",

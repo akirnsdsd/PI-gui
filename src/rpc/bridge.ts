@@ -7,7 +7,34 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type QueueMode = "all" | "one-at-a-time";
 export type StreamingBehavior = "steer" | "followUp";
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+/**
+ * 思考程度档位。与 pi 的 `VALID_THINKING_LEVELS`（dist/cli/args.js）一致，同名直传，
+ * 无转换层。注意 `max` 也是合法档位（CLI 可用 --thinking max）。
+ *
+ * **实际可用档位按模型而异**，不能拿本类型当作可选项列表直接渲染：
+ * pi-ai 的 `getSupportedThinkingLevels` 规则是——模型 `reasoning` 为 false 时只有
+ * `off`；`thinkingLevelMap` 里显式写 null 的档不可用；而 `xhigh` 和 `max`
+ * 必须在 `thinkingLevelMap` 里显式出现才可用。传了不支持的档位会被
+ * `clampThinkingLevel` 静默夹取（先往高找最近可用档，找不到再往低）。
+ * 所以下拉要用 `get_available_thinking_levels` 拿到的真实列表渲染。
+ */
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** 按 pi 的档位递增顺序排列，用于排序和夹取推演。 */
+export const THINKING_LEVEL_ORDER: readonly ThinkingLevel[] = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const;
+
+/** 运行时收窄：RPC 返回的是 string[]，不能直接当 ThinkingLevel 用。 */
+export function isThinkingLevel(value: string): value is ThinkingLevel {
+	return (THINKING_LEVEL_ORDER as readonly string[]).includes(value);
+}
 
 export interface RpcStartOptions {
 	cliPath: string | null;
@@ -979,10 +1006,15 @@ export class RpcBridge {
 		});
 	}
 
-	async getAvailableThinkingLevels(): Promise<string[]> {
+	/**
+	 * 当前模型实际支持的档位。pi 侧源头是 `getSupportedThinkingLevels(model)`，
+	 * 因此**换模型后必须重拉**。过滤掉本端不认识的值，避开 pi 日后新增档位
+	 * 时前端拿到陆生字符串。
+	 */
+	async getAvailableThinkingLevels(): Promise<ThinkingLevel[]> {
 		const response = await this.send({ type: "get_available_thinking_levels" });
 		const data = this.getData<{ levels: string[] }>(response);
-		return data.levels;
+		return (data.levels ?? []).filter(isThinkingLevel);
 	}
 
 	async getLastAssistantText(): Promise<string | null> {
@@ -1865,7 +1897,7 @@ class ActiveRpcBridgeProxy {
 		return this.activeBridge.clone();
 	}
 
-	async getAvailableThinkingLevels(): Promise<string[]> {
+	async getAvailableThinkingLevels(): Promise<ThinkingLevel[]> {
 		return this.activeBridge.getAvailableThinkingLevels();
 	}
 

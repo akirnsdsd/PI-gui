@@ -688,7 +688,12 @@ export interface MergeProviderModelScopeResult {
 	patterns?: string[];
 }
 
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+/**
+ * 合法的 thinking suffix。与 pi 的 `VALID_THINKING_LEVELS`（dist/cli/args.js）对齐——
+ * `parseModelPattern` 就是用 `isValidThinkingLevel` 判定后缀的，少一个档位会让
+ * `…:max` 这类 pattern 被误当成模型 id 的一部分。
+ */
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 /** enabledModels pattern 是否含 glob 字符（与 pi resolveModelScope 的判定一致）。 */
 function isGlobPattern(pattern: string): boolean {

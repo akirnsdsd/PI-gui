@@ -11,6 +11,7 @@ import {
 	resolveModelPickerSubmenuPlacement,
 	resolveSessionRefreshScrollAction,
 	resolveViewportPopoverLeft,
+	subtractBlockedThinkingLevels,
 } from "./desktop-ui-behavior.js";
 import { openImageLightbox } from "./image-lightbox.js";
 import {
@@ -19,6 +20,7 @@ import {
 	type RpcSessionState,
 	type SessionRewriteResult,
 	type ThinkingLevel,
+	THINKING_LEVEL_ORDER,
 	SessionRewriteCommittedError,
 	rpcBridge,
 } from "../rpc/bridge.js";
@@ -413,12 +415,20 @@ function formatThinkingDisplayName(level: ThinkingLevel): string {
 			return t("chatView.thinkingLevel.high");
 		case "xhigh":
 			return t("chatView.thinkingLevel.xhigh");
+		case "max":
+			return t("chatView.thinkingLevel.max");
 		default:
 			return t("chatView.thinkingLevel.off");
 	}
 }
 
-const THINKING_LEVEL_CYCLE_ORDER: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+/**
+ * 快捷键循环的兼容顺序。包含 `max`（pi 的最高档）。
+ *
+ * 实际循环时会跳过当前模型不支持的档，优先用
+ * `get_available_thinking_levels` 拿到的权威列表，拿不到才回退到本常量。
+ */
+const THINKING_LEVEL_CYCLE_ORDER: ThinkingLevel[] = [...THINKING_LEVEL_ORDER];
 
 function uiIcon(name: "edit" | "retry" | "copy" | "attach" | "send" | "stop" | "spinner" | "spark" | "terminal" | "git" | "diff" | "fork" | "plus"): TemplateResult {
 	switch (name) {
@@ -531,6 +541,14 @@ export class ChatView {
 	private settingModel = false;
 	private settingThinking = false;
 	private unsupportedThinkingLevelsByModel = new Map<string, Set<ThinkingLevel>>();
+	/**
+	 * 按模型缓存的可用思考档位（权威源：pi 的 get_available_thinking_levels，
+	 * 其背后是 pi-ai 的 getSupportedThinkingLevels）。
+	 * key 与 unsupportedThinkingLevelsByModel 同一格式：`provider::modelId`。
+	 */
+	private availableThinkingLevelsByModel = new Map<string, ThinkingLevel[]>();
+	/** 防重：同一模型的拉取只跑一次。 */
+	private thinkingLevelsFetchKey: string | null = null;
 	private modelPickerOpen = false;
 	private modelPickerSubmenuOpen = false;
 	private addMenuOpen = false;
@@ -2026,6 +2044,7 @@ export class ChatView {
 		if (!this.isConnected) return;
 		void this.refreshFromBackend();
 		void this.loadAvailableModels();
+		void this.refreshAvailableThinkingLevels();
 		void this.loadProviderAuthStatus();
 		void this.loadOAuthProviderCatalog();
 		void this.loadModelCatalog();
@@ -2183,6 +2202,7 @@ export class ChatView {
 			void this.flushOfflineComposerQueue();
 			void this.refreshSessionStats(true);
 			void this.refreshGitSummary(true);
+			void this.refreshAvailableThinkingLevels();
 			if (!this.loadingModels && this.availableModels.length === 0) {
 				void this.loadAvailableModels();
 			}
@@ -2432,6 +2452,8 @@ export class ChatView {
 			this.syncComposerQueueFromState(this.state);
 			this.recomputeProviderAuthConfigured();
 			if (this.state) this.onStateChange?.(this.state);
+			// 可用思考档位是按模型算的（pi-ai getSupportedThinkingLevels），换了模型必须重拉。
+			void this.refreshAvailableThinkingLevels(true);
 			void this.refreshSessionStats(true);
 			this.pushNotice(t("chatView.notice.modelSwitched", { model: `${provider}/${modelId}` }), "success");
 			return true;
@@ -2476,6 +2498,58 @@ export class ChatView {
 		return this.unsupportedThinkingLevelsByModel.get(key) ?? new Set<ThinkingLevel>();
 	}
 
+	/**
+	 * 当前模型可用的思考档位。**三态**，不能崩成两态：
+	 * - `null` = 尚未拿到权威列表（未拉取/拉取中/拉取失败）——此时**不猜**模型能力；
+	 * - `[]` = pi 明确告知一档也不可用（自定义模型确实可能得到空集）；
+	 * - 非空数组 = 权威列表，再减去本地已知被夹取过的档（缓存可能陈旧）。
+	 *
+	 * 把未知当成「全 7 档可用」是错的：`reasoning: false` 的模型只有 `off`，
+	 * 基础档也可被 `thinkingLevelMap[level] = null` 禁用，那会给出整片假选项。
+	 */
+	private availableThinkingLevelsForCurrentModel(): ThinkingLevel[] | null {
+		const key = this.thinkingLevelModelKey(this.state);
+		if (!key) return null;
+		const cached = this.availableThinkingLevelsByModel.get(key);
+		if (!cached) return null;
+		return subtractBlockedThinkingLevels(cached, this.unsupportedThinkingLevelsByModel.get(key));
+	}
+
+	/**
+	 * 拉当前模型的可用档位。模型变了就得重拉——pi 侧这个列表是
+	 * `getSupportedThinkingLevels(model)` 算的，换模型后结果不同。
+	 *
+	 * 失败不报错：这只是下拉选项的优化，拿不到就保持未知态，不能打扰用户。
+	 * 旧版 pi（无此命令）会返回 Unknown command，走同一条 catch。
+	 */
+	private async refreshAvailableThinkingLevels(force = false): Promise<void> {
+		const key = this.thinkingLevelModelKey(this.state);
+		if (!key) return;
+		// 已有缓存且非强制：不重拉。缓存存在性才是「已完成」的标志，
+		// 不能拿在途标记兼任这个职责——否则一次被丢弃的拉取会永久堵住重试。
+		if (!force && this.availableThinkingLevelsByModel.has(key)) return;
+		// 同一模型的拉取已在途：不叠发。
+		if (this.thinkingLevelsFetchKey === key) return;
+		this.thinkingLevelsFetchKey = key;
+		try {
+			const levels = await rpcBridge.getAvailableThinkingLevels();
+			// 拉取期间可能已经换了模型或会话，写回前确认 key 没变
+			if (this.thinkingLevelModelKey(this.state) !== key) return;
+			const previous = this.availableThinkingLevelsByModel.get(key);
+			const changed = !previous || previous.join(",") !== levels.join(",");
+			// 空列表也是权威结果（pi 明确说一档不可用），照存。
+			this.availableThinkingLevelsByModel.set(key, levels);
+			// 权威结果到手，反应式推断就该让位（否则陈旧的 blocked 会持续减项）。
+			if (levels.length > 0) this.unsupportedThinkingLevelsByModel.delete(key);
+			if (changed) this.render();
+		} catch (err) {
+			console.warn("Failed to fetch available thinking levels:", err);
+		} finally {
+			// 无论成败都释放在途标记，下次触发点还能重试。
+			if (this.thinkingLevelsFetchKey === key) this.thinkingLevelsFetchKey = null;
+		}
+	}
+
 	private async setThinkingLevel(level: ThinkingLevel): Promise<ThinkingLevel | null> {
 		if (this.settingThinking) return this.state?.thinkingLevel ?? null;
 		const requestedLevel = level;
@@ -2484,9 +2558,18 @@ export class ChatView {
 		}
 		this.settingThinking = true;
 		this.render();
+		// 在 await 之前快照模型 key：rpcBridge 是多会话包装，set 与随后的 getState
+		// 是两次独立转发。快速切会话/切模型时，第二次可能已经落到另一个
+		// bridge 上，拿 B 的状态去判定 A 的请求是否被夹取，会污染缓存并误弹提示。
+		const requestModelKey = this.thinkingLevelModelKey(this.state);
 		try {
 			await rpcBridge.setThinkingLevel(requestedLevel);
-			this.state = await rpcBridge.getState();
+			const nextState = await rpcBridge.getState();
+			// 模型/会话已变：这次结果不属于当前上下文，丢弃（不写状态、不记缓存、不提示）。
+			if (this.thinkingLevelModelKey(nextState) !== requestModelKey) {
+				return nextState?.thinkingLevel ?? null;
+			}
+			this.state = nextState;
 			this.syncComposerQueueFromState(this.state);
 			if (this.state) this.onStateChange?.(this.state);
 			if (this.state?.thinkingLevel === requestedLevel) {
@@ -2494,8 +2577,19 @@ export class ChatView {
 			} else {
 				this.markThinkingLevelUnsupported(requestedLevel, this.state);
 			}
-			if (requestedLevel === "xhigh" && this.state?.thinkingLevel !== "xhigh") {
-				this.pushNotice(t("chatView.notice.xhighUnavailable", { level: this.state?.thinkingLevel || "high" }), "info");
+			// 夹取提示对所有档位生效，不只 xhigh：pi 会静默夹取任何不支持的档，
+			// 不告知的话用户以为选上了。
+			const applied = this.state?.thinkingLevel;
+			if (applied && applied !== requestedLevel) {
+				this.pushNotice(
+					t("chatView.notice.thinkingLevelClamped", {
+						requested: formatThinkingDisplayName(requestedLevel),
+						level: formatThinkingDisplayName(applied),
+					}),
+					"info",
+				);
+				// 夹取意味着本地的可用列表过时了，重拉一次
+				void this.refreshAvailableThinkingLevels(true);
 			}
 			void this.refreshSessionStats(true);
 			return this.state?.thinkingLevel ?? null;
@@ -2512,6 +2606,10 @@ export class ChatView {
 	private async cycleThinkingLevel(direction: 1 | -1 = 1): Promise<void> {
 		if (this.settingThinking) return;
 		const order = THINKING_LEVEL_CYCLE_ORDER;
+		// 权威列表优先：它直接告诉我们哪些档不存在，不必靠夹取失败去发现。
+		// null = 尚未拿到，此时不设限，仍靠 blocked 反应式跳过。
+		const authoritative = this.availableThinkingLevelsForCurrentModel();
+		const allowed = authoritative === null ? null : new Set(authoritative);
 		let cursor = Math.max(0, order.indexOf((this.state?.thinkingLevel ?? "off") as ThinkingLevel));
 
 		for (let attempt = 0; attempt < order.length; attempt += 1) {
@@ -2521,6 +2619,8 @@ export class ChatView {
 				const nextIndex = (cursor + step * direction + order.length * 2) % order.length;
 				const nextLevel = order[nextIndex] ?? "off";
 				if (blocked.has(nextLevel)) continue;
+				// allowed 为 null 说明拿不到权威列表，此时不设限。
+				if (allowed && allowed.size > 0 && !allowed.has(nextLevel)) continue;
 				candidate = nextLevel;
 				cursor = nextIndex;
 				break;
@@ -5692,6 +5792,7 @@ export class ChatView {
 			settingModel: this.settingModel,
 			settingThinking: this.settingThinking,
 			thinkingValue,
+			thinkingAvailableLevels: this.availableThinkingLevelsForCurrentModel(),
 			thinkingLabel,
 			thinkingMenuOpen: this.thinkingMenuOpen,
 			currentProvider,

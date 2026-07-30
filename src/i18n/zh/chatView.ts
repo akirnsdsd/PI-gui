@@ -11,6 +11,8 @@ export default {
 		medium: "中",
 		high: "高",
 		xhigh: "极高",
+		/** pi 的 max 档（Maximum reasoning）。 */
+		max: "最大",
 	},
 	working: {
 		ariaLabel: "Pi 正在工作",
@@ -117,7 +119,8 @@ export default {
 		modelSwitched: "已切换到 {model}",
 		modelSwitchFailed: "切换模型失败",
 		thinkingSetFailed: "设置思考级别失败",
-		xhighUnavailable: "此模型不支持 xhigh（已使用 {level}）",
+		/** pi 对不支持的档位会静默夹取，这里把结果说明白。 */
+		thinkingLevelClamped: "此模型不支持「{requested}」，已改为「{level}」",
 		aborted: "已中止当前运行",
 		abortFailed: "中止当前运行失败",
 	},

@@ -4,6 +4,7 @@ import { resolveModelPickerAuthHint, resolveModelPickerProviderAuthActionState, 
 import type { ModelPickerProviderGroup } from "../../models/model-picker-provider-groups.js";
 import { normalizeProviderKey } from "../../auth/provider-auth.js";
 import type { ThinkingLevel } from "../../rpc/bridge.js";
+import { resolveThinkingLevelOptions } from "../desktop-ui-behavior.js";
 import { t } from "../../i18n/index.js";
 
 interface CloseModelPickerOptions {
@@ -27,8 +28,6 @@ function getAuthActionLabel(label: ModelPickerProviderAuthActionState["label"]):
 	}
 }
 
-const THINKING_LEVEL_OPTIONS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
-
 function getThinkingLevelLabel(level: ThinkingLevel): string {
 	switch (level) {
 		case "off":
@@ -43,6 +42,8 @@ function getThinkingLevelLabel(level: ThinkingLevel): string {
 			return t("composer.controls.thinking.high");
 		case "xhigh":
 			return t("composer.controls.thinking.xhigh");
+		case "max":
+			return t("composer.controls.thinking.max");
 	}
 }
 
@@ -54,6 +55,11 @@ interface RenderComposerControlsViewParams {
 	settingModel: boolean;
 	settingThinking: boolean;
 	thinkingValue: ThinkingLevel;
+	/**
+	 * 当前模型实际支持的档位（源头：pi 的 get_available_thinking_levels）。
+	 * **`null` = 尚未拿到**，此时不猜模型能力，只展示已生效的那一档。
+	 */
+	thinkingAvailableLevels: ThinkingLevel[] | null;
 	thinkingLabel: string;
 	thinkingMenuOpen: boolean;
 	currentProvider: string;
@@ -103,6 +109,7 @@ export function renderComposerControlsView({
 	settingModel,
 	settingThinking,
 	thinkingValue,
+	thinkingAvailableLevels,
 	thinkingLabel,
 	thinkingMenuOpen,
 	currentProvider,
@@ -397,7 +404,7 @@ export function renderComposerControlsView({
 					${thinkingMenuOpen
 						? html`
 							<div class="thinking-menu-popover composer-popover-card" role="listbox" aria-label=${t("composer.controls.thinkingTitle")}>
-								${THINKING_LEVEL_OPTIONS.map(
+								${resolveThinkingLevelOptions(thinkingAvailableLevels, thinkingValue).map(
 									(level) => html`
 										<button
 											type="button"
