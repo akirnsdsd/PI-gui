@@ -307,6 +307,8 @@ export class SettingsPanel {
 		this.createThemeDialogError = "";
 		closeAllSettingsSelects();
 		this.applyAppearanceProfileForCurrentResolvedTheme();
+		// 面板关闭后必须停掉子智能体 runs 的轮询，否则会在后台一直读磁盘。
+		this.subagentsSettings.stopRunsAutoRefresh();
 		this.isOpen = false;
 		this.render();
 		this.emitNavigationState();
@@ -320,6 +322,7 @@ export class SettingsPanel {
 		this.createThemeDialogError = "";
 		closeAllSettingsSelects();
 		this.applyAppearanceProfileForCurrentResolvedTheme();
+		this.subagentsSettings.stopRunsAutoRefresh();
 		this.isOpen = false;
 	}
 

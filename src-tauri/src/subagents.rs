@@ -512,8 +512,40 @@ pub enum SubagentRunStatus {
     Succeeded,
     /// 有 exit_code，退出码非 0。
     Failed,
+    /// 无 exit_code，但日志末尾也没有终态事件，且日志刚刚还在长。
+    ///
+    /// 这不是猜：进程写 exit_code 是退出时的动作，没有它说明进程未正常退出；
+    /// 再叠上「日志在活跃追加」这个正向信号，才能报运行中。
+    /// 两者缺一就退回 Unknown——宁可说不知道，不能把被杀的进程报成在跑。
+    Running,
     /// 没有 exit_code：进程可能在跑、可能被杀、可能写失败。不猜。
     Unknown,
+}
+
+/// 日志被认为「活跃」的时间窗（毫秒）。
+///
+/// 取 90 秒：子智能体单次模型请求可能几十秒不写日志，太短会把正在思考的
+/// 任务误报成已停；太长又会把刚被杀的报成在跑。这个值只影响 Running 与
+/// Unknown 的分界，不影响已结束判定（后者靠 exit_code，是硬信号）。
+const RUNNING_LOG_ACTIVE_WINDOW_MS: u64 = 90_000;
+
+/// 日志末尾是否已出现终态事件。子进程正常跑完会写 agent_settled。
+pub fn log_tail_looks_settled(tail: &str) -> bool {
+    tail.contains("\"agent_settled\"") || tail.contains("\"agent_end\"")
+}
+
+/// 在无 exit_code 时，结合日志信号细分 Running / Unknown。
+///
+/// - `settled` = 日志末尾已有终态事件（跑完了但 exit_code 没写上）→ Unknown
+/// - `log_age_ms` 在活跃窗口内且未 settled → Running
+pub fn refine_status_without_exit_code(settled: bool, log_age_ms: Option<u64>) -> SubagentRunStatus {
+    if settled {
+        return SubagentRunStatus::Unknown;
+    }
+    match log_age_ms {
+        Some(age) if age <= RUNNING_LOG_ACTIVE_WINDOW_MS => SubagentRunStatus::Running,
+        _ => SubagentRunStatus::Unknown,
+    }
 }
 
 /// 仅根据可证明的信号判定状态。exit_code 文件内容是进程退出码的十进制文本。
@@ -570,6 +602,66 @@ fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// 读文件末尾至多 `max_bytes` 字节。
+///
+/// **绝不整读** `events.jsonl`——实测它能到 55MB。只需末尾就能判断有无终态事件。
+fn read_tail(path: &Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::with_capacity(max_bytes.min(len) as usize);
+    file.take(max_bytes).read_to_end(&mut buf).ok()?;
+    // 尾部可能切在多字节 UTF-8 中间，用 lossy 不报错。
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// 从 events.jsonl 第一行的 session 头里取 cwd。
+///
+/// 无 result.json（还在跑、或被中途杀）时，这是拿到 cwd 的唯一途径。
+/// 注意第一行不一定是 JSON：日志过大被截短时会有中文提示行，因此解析失败要宽容。
+fn read_session_cwd(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    // 只看开头几行：截短提示行可能占第一行。
+    for _ in 0..4 {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("type").and_then(|v| v.as_str()) == Some("session") {
+            return value
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+        }
+    }
+    None
+}
+
+/// 从 run 目录名推 agent 名。格式是 `<agent>-<时间戳>-<随机>`，
+/// 而 agent 名本身可能带下划线（如 local_knowledge_maintainer）但不带连字符。
+pub fn agent_name_from_run_id(run_id: &str) -> Option<String> {
+    let mut parts: Vec<&str> = run_id.split('-').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    // 去掉末尾的时间戳与随机后缀
+    parts.truncate(parts.len() - 2);
+    let name = parts.join("-");
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 #[tauri::command]
 pub async fn list_subagent_runs() -> Result<SubagentRunListResult, String> {
     let dir = runs_dir()?;
@@ -609,8 +701,22 @@ pub async fn list_subagent_runs() -> Result<SubagentRunListResult, String> {
             .unwrap_or_default();
 
         let exit_raw = std::fs::read_to_string(path.join("exit_code")).ok();
-        let status = classify_run_status(exit_raw.as_deref());
+        let mut status = classify_run_status(exit_raw.as_deref());
         let exit_code = exit_raw.as_deref().and_then(|t| t.trim().parse::<i32>().ok());
+
+        let events_path = path.join("events.jsonl");
+        // 无 exit_code 时细分 Running / Unknown：只看末尾 8KB，绝不整读。
+        if status == SubagentRunStatus::Unknown {
+            let settled = read_tail(&events_path, 8 * 1024)
+                .map(|tail| log_tail_looks_settled(&tail))
+                .unwrap_or(false);
+            let log_age_ms = std::fs::metadata(&events_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_millis() as u64);
+            status = refine_status_without_exit_code(settled, log_age_ms);
+        }
 
         let result_path = path.join("result.json");
         let has_result = result_path.is_file();
@@ -634,16 +740,17 @@ pub async fn list_subagent_runs() -> Result<SubagentRunListResult, String> {
                 }
             }
         }
-        // 无 result.json 时至少从目录名拿 agent 名（格式是 `<agent>-<时间戳>-<随机>`）。
+        // 无 result.json（还在跑、或被中途杀）时的兜底：agent 名从目录名推，
+        // cwd 从 events.jsonl 第一行的 session 头取。运行中的任务全靠这两条
+        // 才能在面板上显示得出「谁在跑、在哪跑」。
         if agent.is_none() {
-            agent = run_id
-                .rsplitn(3, '-')
-                .last()
-                .map(str::to_string)
-                .filter(|s| !s.is_empty());
+            agent = agent_name_from_run_id(&run_id);
+        }
+        if cwd.is_none() {
+            cwd = read_session_cwd(&events_path);
         }
 
-        let events_bytes = file_len(&path.join("events.jsonl"));
+        let events_bytes = file_len(&events_path);
         let stderr_bytes = file_len(&path.join("stderr.log"));
         let total_bytes = events_bytes + stderr_bytes + file_len(&result_path);
         returned_bytes += total_bytes;
@@ -671,6 +778,195 @@ pub async fn list_subagent_runs() -> Result<SubagentRunListResult, String> {
         total,
         truncated,
         returned_bytes,
+    })
+}
+
+/// 单条 run 详情的返回上限。
+const MAX_RUN_DETAIL_MESSAGES: usize = 40;
+/// 单条消息文本的截断长度。
+const MAX_RUN_DETAIL_TEXT_CHARS: usize = 4_000;
+/// events.jsonl 尾部读取窗口。绝不整读——实测该文件可达 55MB。
+const RUN_DETAIL_TAIL_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentRunMessage {
+    pub role: String,
+    pub text: String,
+    /// 该条是否被截断（前端要提示用户去看原始日志）。
+    pub truncated: bool,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentRunDetail {
+    pub run_id: String,
+    pub dir: String,
+    /// 从 result.json 读到的最终文本（完成的任务才有）。
+    pub final_text: Option<String>,
+    pub final_text_truncated: bool,
+    /// 从 events.jsonl 尾部解析出的消息（新→旧已反转为旧→新）。
+    pub messages: Vec<SubagentRunMessage>,
+    /// 是否因为只读了尾部而可能漏掉更早的消息。
+    pub tail_only: bool,
+    pub stderr_preview: Option<String>,
+    pub events_bytes: u64,
+}
+
+/// 校验 runId：只允许字母、数字、下划线、连字符、点。
+///
+/// 前端传的是列表里回来的 runId，但**绝不能信任**——它决定要拼进路径的目录名。
+/// 拒绝分隔符和 `..` 防路径穿越。
+fn resolve_run_dir(run_id: &str) -> Result<PathBuf, String> {
+    if run_id.is_empty() {
+        return Err("runId 不能为空".to_string());
+    }
+    if run_id.contains('/')
+        || run_id.contains('\\')
+        || run_id.contains("..")
+        || Path::new(run_id).is_absolute()
+    {
+        return Err(format!("不合法的 runId：{}", run_id));
+    }
+    if !run_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(format!("不合法的 runId：{}", run_id));
+    }
+    let base = runs_dir()?;
+    let target = base.join(run_id);
+    // 已存在时校验规范化后的父目录恰好是 runs 根（比 starts_with 严）。
+    if target.exists() {
+        let canonical_base = base
+            .canonicalize()
+            .map_err(|e| format!("无法解析运行记录目录：{}", e))?;
+        let canonical_target = target
+            .canonicalize()
+            .map_err(|e| format!("无法解析路径 {}：{}", target.display(), e))?;
+        if canonical_target.parent() != Some(canonical_base.as_path()) {
+            return Err("目标路径不在运行记录目录内".to_string());
+        }
+    }
+    Ok(target)
+}
+
+/// 从一条 message_end 事件里提取可读文本。
+///
+/// content 是分段数组，可能含 thinking / text / toolCall 等。只取 text 段拼接；
+/// thinking 段跳过（子智能体的思考过程对查历史没用且极长）。
+pub fn extract_message_text(message: &serde_json::Value) -> Option<SubagentRunMessage> {
+    let role = message.get("role").and_then(|v| v.as_str())?.to_string();
+    let content = message.get("content")?;
+    let mut buf = String::new();
+    if let Some(parts) = content.as_array() {
+        for part in parts {
+            if part.get("type").and_then(|v| v.as_str()) != Some("text") {
+                continue;
+            }
+            if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(text);
+            }
+        }
+    } else if let Some(text) = content.as_str() {
+        buf.push_str(text);
+    }
+    let trimmed = buf.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let truncated = trimmed.chars().count() > MAX_RUN_DETAIL_TEXT_CHARS;
+    let text = if truncated {
+        trimmed.chars().take(MAX_RUN_DETAIL_TEXT_CHARS).collect()
+    } else {
+        trimmed.to_string()
+    };
+    Some(SubagentRunMessage {
+        role,
+        text,
+        truncated,
+        model: message
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
+#[tauri::command]
+pub async fn read_subagent_run(run_id: String) -> Result<SubagentRunDetail, String> {
+    let dir = resolve_run_dir(&run_id)?;
+    if !dir.is_dir() {
+        return Err(format!("运行记录不存在：{}", run_id));
+    }
+
+    // final_text 来自 result.json（只有完成的任务才有）
+    let result_path = dir.join("result.json");
+    let mut final_text = None;
+    let mut final_text_truncated = false;
+    if result_path.is_file() && file_len(&result_path) <= MAX_RESULT_BYTES {
+        if let Ok(text) = std::fs::read_to_string(&result_path) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(body) = value.get("finalText").and_then(|v| v.as_str()) {
+                    final_text_truncated = body.chars().count() > MAX_RUN_DETAIL_TEXT_CHARS;
+                    final_text = Some(if final_text_truncated {
+                        body.chars().take(MAX_RUN_DETAIL_TEXT_CHARS).collect()
+                    } else {
+                        body.to_string()
+                    });
+                }
+            }
+        }
+    }
+
+    // 消息从 events.jsonl **尾部**解析：整读会把 55MB 拉进内存。
+    let events_path = dir.join("events.jsonl");
+    let events_bytes = file_len(&events_path);
+    let tail_only = events_bytes > RUN_DETAIL_TAIL_BYTES;
+    let mut messages: Vec<SubagentRunMessage> = Vec::new();
+    if let Some(tail) = read_tail(&events_path, RUN_DETAIL_TAIL_BYTES) {
+        // 从后往前扫，凑够上限就停——最近的消息最有用。
+        for line in tail.lines().rev() {
+            if messages.len() >= MAX_RUN_DETAIL_MESSAGES {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            if event.get("type").and_then(|v| v.as_str()) != Some("message_end") {
+                continue;
+            }
+            let Some(message) = event.get("message") else {
+                continue;
+            };
+            if let Some(parsed) = extract_message_text(message) {
+                messages.push(parsed);
+            }
+        }
+    }
+    messages.reverse();
+
+    let stderr_path = dir.join("stderr.log");
+    let stderr_preview = read_tail(&stderr_path, 8 * 1024)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty());
+
+    Ok(SubagentRunDetail {
+        run_id,
+        dir: dir.to_string_lossy().to_string(),
+        final_text,
+        final_text_truncated,
+        messages,
+        tail_only,
+        stderr_preview,
+        events_bytes,
     })
 }
 
@@ -761,6 +1057,120 @@ mod tests {
         assert_eq!(classify_run_status(None), SubagentRunStatus::Unknown);
         assert_eq!(classify_run_status(Some("")), SubagentRunStatus::Unknown);
         assert_eq!(classify_run_status(Some("不是数字")), SubagentRunStatus::Unknown);
+    }
+
+    /// Running 必须是**可证明**的，不能猜。
+    ///
+    /// exit_code 是进程退出时才写的硬信号；缺它只说明「没正常退出」，
+    /// 可能在跑也可能被杀。所以还要叠一个正向信号（日志在活跃追加）才敢报运行中。
+    #[test]
+    fn refines_running_only_with_positive_signal() {
+        // 日志活跃 + 未见终态 → 运行中
+        assert_eq!(
+            refine_status_without_exit_code(false, Some(1_000)),
+            SubagentRunStatus::Running
+        );
+        // 日志已久未动 → 不猜
+        assert_eq!(
+            refine_status_without_exit_code(false, Some(10 * 60 * 1000)),
+            SubagentRunStatus::Unknown
+        );
+        // 已见终态事件但没写 exit_code → 不是运行中
+        assert_eq!(
+            refine_status_without_exit_code(true, Some(1_000)),
+            SubagentRunStatus::Unknown
+        );
+        // 拿不到日志时间 → 不猜
+        assert_eq!(
+            refine_status_without_exit_code(false, None),
+            SubagentRunStatus::Unknown
+        );
+    }
+
+    /// message_end 的 content 是分段数组：只取 text 段，跳过 thinking。
+    /// 子智能体的思考过程极长且对查历史无用。
+    #[test]
+    fn extracts_only_text_parts_from_message() {
+        let msg: serde_json::Value = serde_json::from_str(
+            r#"{"role":"assistant","model":"m1","content":[
+                {"type":"thinking","text":"内部推理很长很长"},
+                {"type":"text","text":"第一段结论"},
+                {"type":"text","text":"第二段结论"}
+            ]}"#,
+        )
+        .unwrap();
+        let parsed = extract_message_text(&msg).unwrap();
+        assert_eq!(parsed.role, "assistant");
+        assert_eq!(parsed.text, "第一段结论\n第二段结论");
+        assert!(!parsed.truncated);
+        assert_eq!(parsed.model.as_deref(), Some("m1"));
+        assert!(!parsed.text.contains("内部推理"));
+    }
+
+    /// 纯 thinking（无 text 段）不该产出空条目污染列表。
+    #[test]
+    fn skips_messages_without_text_parts() {
+        let msg: serde_json::Value = serde_json::from_str(
+            r#"{"role":"assistant","content":[{"type":"thinking","text":"只有思考"}]}"#,
+        )
+        .unwrap();
+        assert!(extract_message_text(&msg).is_none());
+
+        let empty: serde_json::Value =
+            serde_json::from_str(r#"{"role":"assistant","content":[]}"#).unwrap();
+        assert!(extract_message_text(&empty).is_none());
+    }
+
+    #[test]
+    fn truncates_overlong_message_text() {
+        let long = "x".repeat(MAX_RUN_DETAIL_TEXT_CHARS + 500);
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": long}]
+        });
+        let parsed = extract_message_text(&msg).unwrap();
+        assert!(parsed.truncated);
+        assert_eq!(parsed.text.chars().count(), MAX_RUN_DETAIL_TEXT_CHARS);
+    }
+
+    /// runId 决定要拼进路径的目录名，必须拒绝穿越。
+    #[test]
+    fn rejects_unsafe_run_ids() {
+        assert!(resolve_run_dir("").is_err());
+        assert!(resolve_run_dir("../../etc").is_err());
+        assert!(resolve_run_dir("has/slash").is_err());
+        assert!(resolve_run_dir("has space").is_err());
+        assert!(resolve_run_dir("/abs/path").is_err());
+        // 合法形态（目录不存在时也应通过校验，返回路径由调用方判断存在性）
+        assert!(resolve_run_dir("explore-20260730T193537-gymy").is_ok());
+    }
+
+    #[test]
+    fn detects_terminal_events_in_log_tail() {
+        assert!(log_tail_looks_settled("{\"type\":\"agent_settled\"}"));
+        assert!(log_tail_looks_settled("{\"type\":\"agent_end\"}"));
+        assert!(!log_tail_looks_settled("{\"type\":\"message_update\"}"));
+        assert!(!log_tail_looks_settled(""));
+    }
+
+    /// agent 名可能带下划线（local_knowledge_maintainer）但不带连字符，
+    /// 而 runId 是 `<agent>-<时间戳>-<随机>`。
+    #[test]
+    fn extracts_agent_name_from_run_id() {
+        assert_eq!(
+            agent_name_from_run_id("explore-20260730T193537-gymy").as_deref(),
+            Some("explore")
+        );
+        assert_eq!(
+            agent_name_from_run_id("local_knowledge_maintainer-20260730T035830-f91w").as_deref(),
+            Some("local_knowledge_maintainer")
+        );
+        // 带连字符的 agent 名也能还原（去掉末两段即可）
+        assert_eq!(
+            agent_name_from_run_id("plan-review-20260730T035830-f91w").as_deref(),
+            Some("plan-review")
+        );
+        assert_eq!(agent_name_from_run_id("toofew-x").as_deref(), None);
     }
 
     /// 防回归：本模块的行解析器不是真 YAML，这些输入必须被判为「不能结构化编辑」。

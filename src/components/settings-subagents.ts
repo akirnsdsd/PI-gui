@@ -60,7 +60,7 @@ interface SubagentDetail {
 	mtime_ms: number;
 }
 
-type SubagentRunStatus = "succeeded" | "failed" | "unknown";
+type SubagentRunStatus = "succeeded" | "failed" | "running" | "unknown";
 
 interface SubagentRunEntry {
 	run_id: string;
@@ -76,6 +76,25 @@ interface SubagentRunEntry {
 	stderr_bytes: number;
 	total_bytes: number;
 	mtime_ms: number;
+}
+
+interface SubagentRunMessage {
+	role: string;
+	text: string;
+	truncated: boolean;
+	model: string | null;
+}
+
+interface SubagentRunDetail {
+	runId: string;
+	dir: string;
+	finalText: string | null;
+	finalTextTruncated: boolean;
+	messages: SubagentRunMessage[];
+	/** 只读了日志尾部，更早的消息可能没带出来。 */
+	tailOnly: boolean;
+	stderrPreview: string | null;
+	eventsBytes: number;
 }
 
 interface SubagentRunListResult {
@@ -135,6 +154,12 @@ export class SubagentsSettings {
 
 	private runs: SubagentRunListResult | null = null;
 	private runsLoading = false;
+	/** 运行中任务的轮询定时器（仅 runs tab 打开时存在）。 */
+	private runsPollTimer: number | null = null;
+	/** 展开中的 run 详情（一次只看一条）。 */
+	private runDetail: SubagentRunDetail | null = null;
+	private runDetailLoading = "";
+	private runDetailError = "";
 	private runsError = "";
 
 	private editor: EditorState | null = null;
@@ -180,12 +205,42 @@ export class SubagentsSettings {
 		this.requestRender();
 		try {
 			this.runs = await this.invokeCmd<SubagentRunListResult>("list_subagent_runs");
+			this.syncRunsAutoRefresh();
 		} catch (err) {
 			this.runsError = t("subagents.errors.runsFailed", { message: String(err) });
 		} finally {
 			this.runsLoading = false;
 			this.requestRender();
 		}
+	}
+
+	/**
+	 * 有运行中任务时定时刷新，全部结束就停。
+	 *
+	 * 静态列表会一直显示「运行中」，用户无法知道任务何时完成。5 秒够用：
+	 * 状态源是文件 mtime 与日志尾部，读取很轻（只取末尾 8KB，不整读 events.jsonl）。
+	 * 只在 runs tab 打开时才拉——切走后停掉，不在后台空转。
+	 */
+	private syncRunsAutoRefresh(): void {
+		const hasRunning = (this.runs?.entries ?? []).some((run) => run.status === "running");
+		const shouldPoll = hasRunning && this.activeTab === "runs";
+		if (shouldPoll === Boolean(this.runsPollTimer)) return;
+		if (!shouldPoll) {
+			if (this.runsPollTimer) window.clearInterval(this.runsPollTimer);
+			this.runsPollTimer = null;
+			return;
+		}
+		this.runsPollTimer = window.setInterval(() => {
+			// 正在加载或已切走就跳过这一轮，不叠加请求。
+			if (this.runsLoading || this.activeTab !== "runs") return;
+			void this.loadRuns();
+		}, 5000);
+	}
+
+	/** 面板关闭/切走时必须停表，否则会在后台一直读磁盘。 */
+	stopRunsAutoRefresh(): void {
+		if (this.runsPollTimer) window.clearInterval(this.runsPollTimer);
+		this.runsPollTimer = null;
 	}
 
 	private openNewEditor(): void {
@@ -342,7 +397,8 @@ export class SubagentsSettings {
 
 	private async deleteRun(run: SubagentRunEntry): Promise<void> {
 		// 没有退出码时进程可能仍在写这个目录，删了会把运行记录拆成两半。
-		if (run.status === "unknown") {
+		// running 更明确——日志正在追加，绝不能删。
+		if (run.status === "unknown" || run.status === "running") {
 			this.runsError = t("subagents.runs.unknownHint");
 			this.requestRender();
 			return;
@@ -364,6 +420,92 @@ export class SubagentsSettings {
 			this.runsError = t("subagents.errors.deleteFailed", { message: String(err) });
 			this.requestRender();
 		}
+	}
+
+	/**
+	 * 展开/收起单条 run 的详情。
+	 *
+	 * 详情从 events.jsonl **尾部**解析（Rust 侧限 2MB 窗口、40 条消息、单条 4000 字），
+	 * 实测该文件可达 55MB，绝不整读。
+	 */
+	private async toggleRunDetail(run: SubagentRunEntry): Promise<void> {
+		if (this.runDetail?.runId === run.run_id) {
+			this.runDetail = null;
+			this.runDetailError = "";
+			this.requestRender();
+			return;
+		}
+		this.runDetailLoading = run.run_id;
+		this.runDetailError = "";
+		this.requestRender();
+		try {
+			this.runDetail = await this.invokeCmd<SubagentRunDetail>("read_subagent_run", {
+				runId: run.run_id,
+			});
+		} catch (err) {
+			this.runDetail = null;
+			this.runDetailError = t("subagents.errors.runDetailFailed", { message: String(err) });
+		} finally {
+			this.runDetailLoading = "";
+			this.requestRender();
+		}
+	}
+
+	private renderRunDetail(): TemplateResult {
+		const detail = this.runDetail;
+		if (!detail) return html``;
+		return html`
+			<div class="subagent-run-detail">
+				${detail.tailOnly
+					? html`<div class="settings-desc">${t("subagents.runs.tailOnly")}</div>`
+					: nothing}
+				${detail.finalText
+					? html`
+						<div class="subagent-run-detail-block">
+							<div class="subagent-run-detail-label">${t("subagents.runs.finalText")}</div>
+							<pre class="subagent-run-detail-body">${detail.finalText}</pre>
+							${detail.finalTextTruncated
+								? html`<div class="settings-desc">${t("subagents.runs.truncatedHint")}</div>`
+								: nothing}
+						</div>
+					`
+					: nothing}
+				${detail.messages.length > 0
+					? html`
+						<div class="subagent-run-detail-block">
+							<div class="subagent-run-detail-label">
+								${t("subagents.runs.messages", { count: String(detail.messages.length) })}
+							</div>
+							${detail.messages.map(
+								(message) => html`
+									<div class="subagent-run-msg role-${message.role}">
+										<div class="subagent-run-msg-head">
+											<span>${message.role}</span>
+											${message.model ? html`<code>${message.model}</code>` : nothing}
+										</div>
+										<pre class="subagent-run-detail-body">${message.text}</pre>
+										${message.truncated
+											? html`<div class="settings-desc">${t("subagents.runs.truncatedHint")}</div>`
+											: nothing}
+									</div>
+								`,
+							)}
+						</div>
+					`
+					: nothing}
+				${detail.stderrPreview
+					? html`
+						<div class="subagent-run-detail-block">
+							<div class="subagent-run-detail-label">${t("subagents.runs.stderr")}</div>
+							<pre class="subagent-run-detail-body is-stderr">${detail.stderrPreview}</pre>
+						</div>
+					`
+					: nothing}
+				${!detail.finalText && detail.messages.length === 0 && !detail.stderrPreview
+					? html`<div class="settings-desc">${t("subagents.runs.detailEmpty")}</div>`
+					: nothing}
+			</div>
+		`;
 	}
 
 	private async revealPath(path: string): Promise<void> {
@@ -415,6 +557,8 @@ export class SubagentsSettings {
 					this.requestRender();
 					// 惰加载：首次切到 runs 才读目录。
 					if (id === "runs" && !this.runs && !this.runsLoading) void this.loadRuns();
+					// 切走时停轮询，切回时按当前状态重建。
+					this.syncRunsAutoRefresh();
 				}}
 			>
 				${label}
@@ -687,7 +831,9 @@ export class SubagentsSettings {
 				? t("subagents.runs.status.succeeded")
 				: run.status === "failed"
 					? t("subagents.runs.status.failed", { code: String(run.exit_code ?? "?") })
-					: t("subagents.runs.status.unknown");
+					: run.status === "running"
+						? t("subagents.runs.status.running")
+						: t("subagents.runs.status.unknown");
 		return html`
 			<div class="ext-card subagent-run-card status-${run.status}">
 				<div class="ext-card-main">
@@ -711,24 +857,43 @@ export class SubagentsSettings {
 					${run.status === "unknown"
 						? html`<div class="settings-desc">${t("subagents.runs.unknownHint")}</div>`
 						: nothing}
-					${!run.has_result && run.status !== "unknown"
+					${run.status === "running"
+						? html`<div class="settings-desc">${t("subagents.runs.runningHint")}</div>`
+						: nothing}
+					${!run.has_result && run.status !== "unknown" && run.status !== "running"
 						? html`<div class="settings-desc">${t("subagents.runs.noResultHint")}</div>`
 						: nothing}
 				</div>
 				<div class="ext-view-head-actions">
+					<button
+						type="button"
+						class="ghost-btn"
+						?disabled=${this.runDetailLoading === run.run_id}
+						@click=${() => void this.toggleRunDetail(run)}
+					>
+						${this.runDetailLoading === run.run_id
+							? t("subagents.runs.loadingDetail")
+							: this.runDetail?.runId === run.run_id
+								? t("subagents.runs.hideDetail")
+								: t("subagents.runs.viewDetail")}
+					</button>
 					<button type="button" class="ghost-btn" @click=${() => void this.revealPath(run.dir)}>
 						${t("subagents.runs.openDir")}
 					</button>
 					<button
 						type="button"
 						class="ghost-btn danger"
-						?disabled=${run.status === "unknown"}
+						?disabled=${run.status === "unknown" || run.status === "running"}
 						@click=${() => void this.deleteRun(run)}
 					>
 						${t("subagents.runs.deleteRun")}
 					</button>
 				</div>
 			</div>
+			${this.runDetail?.runId === run.run_id ? this.renderRunDetail() : nothing}
+			${this.runDetailError && this.runDetailLoading === "" && this.runDetail === null
+				? html`<div class="settings-desc ext-error">${this.runDetailError}</div>`
+				: nothing}
 		`;
 	}
 }

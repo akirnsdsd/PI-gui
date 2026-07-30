@@ -12146,3 +12146,88 @@ kbd {
 	right: 16px;
 	transform: none;
 }
+
+/* 运行中的子智能体记录：状态徽标带脉冲，与已结束的静态徽标区分开 */
+.subagent-run-card.status-running .subagent-run-status {
+	background: color-mix(in srgb, var(--accent) 16%, transparent);
+	color: var(--accent);
+	animation: subagentRunPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes subagentRunPulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.55;
+	}
+}
+
+/* 单条 run 的输出详情（展开在卡片下方） */
+.subagent-run-detail {
+	display: grid;
+	gap: 10px;
+	margin: -4px 0 10px;
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-top: none;
+	border-radius: 0 0 10px 10px;
+	background: color-mix(in srgb, var(--bg-muted) 60%, transparent);
+}
+
+.subagent-run-detail-block {
+	display: grid;
+	gap: 5px;
+}
+
+.subagent-run-detail-label {
+	font-size: 11px;
+	font-weight: 500;
+	color: var(--muted);
+}
+
+/* 输出可能很长：给固定高度上限 + 滚动，不让它把设置页撑爆 */
+.subagent-run-detail-body {
+	margin: 0;
+	padding: 8px 10px;
+	max-height: 300px;
+	overflow: auto;
+	overscroll-behavior: contain;
+	border-radius: 7px;
+	background: var(--bg);
+	border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+	font-family: var(--font-family-mono);
+	font-size: 11px;
+	line-height: 1.55;
+	color: var(--text);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.subagent-run-detail-body.is-stderr {
+	color: var(--danger);
+	border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
+.subagent-run-msg {
+	display: grid;
+	gap: 4px;
+	margin-top: 6px;
+}
+
+.subagent-run-msg-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 10px;
+	color: var(--muted-2);
+}
+
+.subagent-run-msg-head code {
+	font-family: var(--font-family-mono);
+	font-size: 10px;
+	padding: 1px 5px;
+	border-radius: 4px;
+	background: color-mix(in srgb, var(--text) 7%, transparent);
+}

@@ -4606,6 +4606,7 @@ pub fn run() {
             subagents::read_subagent,
             subagents::save_subagent,
             subagents::list_subagent_runs,
+            subagents::read_subagent_run,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
