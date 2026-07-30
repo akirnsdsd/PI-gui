@@ -1980,7 +1980,10 @@ export class ChatView {
 		// 实时更新总是比历史快照新：递增代次，让在途刷新的结果作废。
 		this.todoLiveGeneration += 1;
 		this.todoItems = parsed;
-		this.todoPanel?.setTodos(parsed);
+		const changed = this.todoPanel?.setTodos(parsed) ?? false;
+		// 胶囊出现/消失会改变对话区该预留的高度，必须重算，
+		// 否则第一次出现时它会盖住最后一条消息。
+		if (changed) this.updateComposerOffset();
 	}
 
 	/** 切会话时清空：清单是会话级状态，绝不能串到另一个会话。 */
@@ -1988,6 +1991,8 @@ export class ChatView {
 		this.todoItems = [];
 		this.todoViewState = { expanded: false, dismissed: false };
 		this.todoPanel?.reset();
+		// 胶囊消失后要把预留还给对话区。
+		this.updateComposerOffset();
 	}
 
 	/**
@@ -2121,6 +2126,9 @@ export class ChatView {
 	};
 
 	private onGlobalViewportChangeForModelPicker = (): void => {
+		// 胶囊浮层最大宽度/高度跟视口相关（max-width: min(520px, 92%)、
+		// max-height: min(46vh, 340px)），缩窗后重渲染一次。
+		this.todoPanel?.render();
 		if (!this.modelPickerOpen) return;
 		this.clampModelPickerPopover();
 	};
@@ -5259,7 +5267,18 @@ export class ChatView {
 		}
 
 		const apply = () => {
-			const measured = Math.max(140, Math.ceil(composer.getBoundingClientRect().height) + 18);
+			// 胶囊绝对定位在 composer-shell **之外**（抬到它上方），不计入 shell 的
+			// getBoundingClientRect。不单独加上它的高度，.chat-scroll 的 padding-bottom
+			// 就不会为它预留空间，胶囊会盖住最后一条消息。
+			// 只算胶囊本身（那一小条），hover 浮层不算——浮层是瞬时的，
+			// 为它预留会让对话区平时空出一大块。
+			const chip = this.container.querySelector<HTMLElement>(".todo-chip");
+			const chipReserve = chip ? Math.ceil(chip.getBoundingClientRect().height) + 8 : 0;
+			// 回到底部按钮与胶囊都是 left:50% 居中同高，会正面重叠：
+			// 有胶囊时给 chat-root 打标记，让按钮横向让位。
+			chatRoot.classList.toggle("has-todo-chip", Boolean(chip));
+			const measured =
+				Math.max(140, Math.ceil(composer.getBoundingClientRect().height) + 18) + chipReserve;
 			if (Math.abs(measured - this.composerOffsetPx) < 2) return;
 			this.composerOffsetPx = measured;
 			chatRoot.style.setProperty("--composer-offset", `${measured}px`);
@@ -6174,7 +6193,7 @@ export class ChatView {
 					<!-- Todo 面板：在 DOM 上真正位于 composer 上方，由 flex 定位。
 					     不用 extension-ui-handler 那两个 fixed 容器（它们硬编码
 					     bottom-[132px] left-[278px] 猜侧边栏宽度和 composer 高度）。 -->
-					<div id="todo-panel-slot" class="hidden-pane"></div>
+					<div id="todo-panel-slot" class="todo-slot-empty"></div>
 					${renderQueuedComposerMessagesView(this.queuedComposerMessages, truncate)}
 					${this.renderComposerPanel()}
 

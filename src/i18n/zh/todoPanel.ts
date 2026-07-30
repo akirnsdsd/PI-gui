@@ -1,17 +1,20 @@
 /**
- * Todo 面板文案（composer 上方的任务条）。
+ * Todo 胶囊文案（composer 上方居中的窄胶囊 + hover 浮层）。
  *
- * 数据来自用户自装的 `todo` 扩展；没装扩展时面板永不出现。
+ * 形态对标 Codex 桌面版：胶囊常驻显示「第 N/M 步」，hover 浮出完整清单。
+ * 数据来自用户自装的 `todo` 扩展；没装扩展时胶囊永不出现。
  */
 export default {
 	title: "任务清单",
-	expand: "展开全部任务",
-	collapse: "收起已完成任务",
+	/** 胶囊上的进行中文案，对齐 Codex 的 `Step N / M`。 */
+	chipStep: "第 {step}/{total} 步",
+	/** 全部完成时的胶囊文案。 */
+	chipDone: "{total} 步已完成",
+	chipTitle: "点击固定展开，移开鼠标自动收起",
+	/** 浮层头部的完成计数。 */
+	countLabel: "{done}/{total} 已完成",
 	dismiss: "隐藏任务清单",
-	more: "还有 {count} 条",
-	/** 进度条的无障碍名称（读屏用）。 */
-	progressLabel: "任务完成进度",
-	/** 单项状态的无障碍文本：✓/○ 是 aria-hidden 的装饰，状态得另给。 */
+	/** ✓/○ 是 aria-hidden 的装饰，状态得另给读屏。 */
 	itemDone: "已完成",
 	itemPending: "未完成",
 } as const;

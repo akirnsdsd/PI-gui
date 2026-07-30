@@ -5024,6 +5024,9 @@ body.file-split-resizing #file-split-resize-handle::after {
 	left: 50%;
 	transform: translateX(-50%);
 	bottom: calc(var(--composer-offset, 196px) + 2px);
+	/* 有 todo 胶囊时让位：两者都是 left:50% 居中、同一高度，会正面重叠。
+	   Codex 自己就因为这两个控件挨太近被投诉误触（issue #28734），
+	   这里直接把按钮往右挪开，不跟胶囊抢位置。 */
 	width: 32px;
 	height: 32px;
 	padding: 0;
@@ -11914,205 +11917,202 @@ kbd {
 	color: var(--muted);
 }
 
+
 /* ---------------------------------------------------------------------------
-   Todo 面板：composer 上方的任务条（对标 Codex 桌面 App）。
-   数据来自 todo 扩展的结构化 details，没装扩展时整块不渲染。
-   位置由 flex 决定（在 .composer-inner 内），不用 fixed 猜像素。
+   Todo 胶囊 + hover 浮层（对标 Codex 桌面版，已核实截图形态）。
+
+   要点：胶囊窄、居中、常驻；浮层绝对定位在胶囊上方，**不占布局**——所以窗口
+   缩小时不会挤压对话区（旧的全宽条会计入 --composer-offset 并转成对话区的
+   padding-bottom，600px 高窗口里能吃掉大半屏）。
+
+   数据来自用户自装的 todo 扩展；没装扩展时整块不渲染。
    --------------------------------------------------------------------------- */
 
-.todo-panel {
-	margin-bottom: 8px;
-	padding: 8px 10px 9px;
-	border-radius: 10px;
-	border: 1px solid var(--border);
-	background: color-mix(in srgb, var(--bg-elev) 88%, transparent);
-	backdrop-filter: blur(8px);
-	font-size: 12px;
+/* wrapper 自身不占高：用 absolute 抬出 composer 的流，只保留胶囊那一点视觉高度。
+   居中对齐 composer 内容宽度。 */
+.todo-chip-wrap {
+	position: absolute;
+	left: 0;
+	right: 0;
+	/* 插槽零高且位于 composer 面板之上，所以 bottom:0 就是贴着面板上边缘 */
+	bottom: 2px;
+	display: flex;
+	justify-content: center;
+	pointer-events: none;
+	z-index: 40;
+}
+
+.todo-chip-wrap > * {
 	pointer-events: auto;
 }
 
-.todo-panel-head {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-}
-
-.todo-panel-toggle {
+.todo-chip {
 	appearance: none;
-	border: none;
-	background: transparent;
-	padding: 0;
 	display: inline-flex;
 	align-items: center;
 	gap: 6px;
+	max-width: 100%;
+	padding: 4px 11px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+	backdrop-filter: blur(10px);
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.14);
+	color: var(--muted);
+	font-size: 11px;
+	line-height: 1.5;
 	cursor: pointer;
+	transition: color 120ms ease, border-color 120ms ease;
+}
+
+.todo-chip:hover,
+.todo-chip-wrap.is-pinned .todo-chip {
 	color: var(--text);
-	font-size: 12px;
+	border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.todo-chip-label {
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	font-variant-numeric: tabular-nums;
+}
+
+/* 进行中：转圈。对齐 Codex 胶囊左侧的 spinner。 */
+.todo-chip-spinner {
+	width: 9px;
+	height: 9px;
+	flex-shrink: 0;
+	border-radius: 50%;
+	border: 1.5px solid color-mix(in srgb, var(--accent) 30%, transparent);
+	border-top-color: var(--accent);
+	animation: todoChipSpin 900ms linear infinite;
+}
+
+@keyframes todoChipSpin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.todo-chip-mark.is-done {
+	color: var(--success);
+	font-size: 10px;
 	flex-shrink: 0;
 }
 
-.todo-panel-caret {
-	color: var(--muted);
-	font-size: 9px;
-	transition: transform 140ms var(--ease-enter);
+/* 浮层：默认隐藏。用 opacity 而非 display，保住过渡与命中性。
+   hover wrapper 或点击固定（is-pinned）时显示。 */
+.todo-chip-popover {
+	position: absolute;
+	bottom: calc(100% + 6px);
+	left: 50%;
+	transform: translateX(-50%) translateY(4px);
+	min-width: 260px;
+	max-width: min(520px, 92%);
+	padding: 9px 11px 10px;
+	border-radius: 10px;
+	border: 1px solid var(--border);
+	background: var(--bg-elev);
+	backdrop-filter: blur(10px);
+	box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 120ms ease, transform 140ms var(--ease-enter);
 }
 
-.todo-panel-caret.is-open {
-	transform: rotate(90deg);
+.todo-chip-wrap:hover .todo-chip-popover,
+.todo-chip-wrap:focus-within .todo-chip-popover,
+.todo-chip-wrap.is-pinned .todo-chip-popover {
+	opacity: 1;
+	pointer-events: auto;
+	transform: translateX(-50%) translateY(0);
 }
 
-.todo-panel-title {
+.todo-chip-popover-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 10px;
+	margin-bottom: 7px;
+}
+
+.todo-chip-popover-title {
+	font-size: 12px;
 	font-weight: 500;
+	color: var(--text);
 }
 
-.todo-panel-count {
+.todo-chip-popover-count {
+	font-size: 11px;
 	color: var(--muted);
 	font-variant-numeric: tabular-nums;
 }
 
-/* 进度条占据中间弹性空间，让计数与关闭按钮分列两端 */
-.todo-panel-progress {
-	flex: 1;
-	min-width: 24px;
-	height: 3px;
-	border-radius: 999px;
-	background: color-mix(in srgb, var(--text) 10%, transparent);
-	overflow: hidden;
-}
-
-.todo-panel-progress-fill {
-	height: 100%;
-	border-radius: 999px;
-	background: var(--accent);
-	transition: width 220ms var(--ease-enter);
-}
-
-.todo-panel.is-complete .todo-panel-progress-fill {
-	background: var(--success);
-}
-
-.todo-panel-dismiss {
-	appearance: none;
-	border: none;
-	background: transparent;
-	color: var(--muted);
-	cursor: pointer;
-	font-size: 15px;
-	line-height: 1;
-	padding: 0 2px;
-	flex-shrink: 0;
-}
-
-.todo-panel-dismiss:hover {
-	color: var(--text);
-}
-
-.todo-panel-list {
+/* 清单最多 200 条，必须能滚——浮层不占布局，但自身不能长过视口。 */
+.todo-chip-list {
 	list-style: none;
-	margin: 7px 0 0;
+	margin: 0;
 	padding: 0;
 	display: grid;
-	gap: 3px;
-	/* 展开时上限 200 条：不设高度上限的话 composer 会长到几千像素，
-	   把标题栏和关闭按钮顶出视口。 */
-	max-height: min(38vh, 320px);
+	gap: 4px;
+	/* 浮层向上展开，短窗口里不能溢出屏幕顶部。
+	   30vh 是在「composer + 胶囊 + 浮层」都在视口内的前提下留的余量。 */
+	max-height: min(30vh, 300px);
 	overflow-y: auto;
 	overscroll-behavior: contain;
 }
 
-.todo-panel-item {
+.todo-chip-item {
 	display: flex;
 	align-items: baseline;
 	gap: 7px;
-	color: var(--text);
+	font-size: 12px;
 	line-height: 1.45;
+	color: var(--text);
 }
 
-.todo-panel-mark {
+.todo-chip-item-mark {
 	flex-shrink: 0;
 	width: 11px;
 	color: var(--muted);
 	font-size: 11px;
 }
 
-.todo-panel-item.is-done .todo-panel-mark {
+/* 完成态照 Codex CLI 源码：删除线 + 置灰，且留在原位不移走
+   （codex-rs/tui/src/history_cell/plans.rs：Completed => crossed_out().dim()）。 */
+.todo-chip-item.is-done .todo-chip-item-mark {
 	color: var(--success);
 }
 
-/* 已完成项降级但不用 line-through：删除线在中文里可读性很差 */
-.todo-panel-item.is-done .todo-panel-text {
+.todo-chip-item.is-done .todo-chip-item-text {
 	color: var(--muted-2);
+	text-decoration: line-through;
+	text-decoration-color: color-mix(in srgb, var(--muted-2) 60%, transparent);
 }
 
-.todo-panel-text {
+/* 进行中项高亮（CLI 里是 cyan().bold()） */
+.todo-chip-item.is-current .todo-chip-item-text {
+	color: var(--text);
+	font-weight: 500;
+}
+
+.todo-chip-item.is-current .todo-chip-item-mark {
+	color: var(--accent);
+}
+
+.todo-chip-item-text {
 	min-width: 0;
 	overflow-wrap: anywhere;
 }
 
-.todo-panel-more {
-	appearance: none;
-	border: none;
-	background: transparent;
-	color: var(--muted);
-	cursor: pointer;
-	font-size: 11px;
-	padding: 5px 0 0 18px;
-}
-
-.todo-panel-more:hover {
-	color: var(--text);
-}
-
-.todo-panel-toggle:focus-visible,
-.todo-panel-dismiss:focus-visible,
-.todo-panel-more:focus-visible {
+.todo-chip:focus-visible {
 	outline: none;
-	box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 44%, transparent);
-	border-radius: 5px;
+	box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 50%, transparent), 0 2px 10px rgba(0, 0, 0, 0.14);
 }
 
-/* 通用扩展 widget 槽位（ctx.ui.setWidget）。
-   旧实现是 fixed + 硬编码 bottom-[132px] left-[278px]，猜侧边栏宽度与 composer
-   高度，侧边栏折叠或 composer 长高就错位。这里改用 CSS 变量跟随实际侧边栏宽度，
-   并用 --composer-offset 跟随实际 composer 高度（该变量由 chat-view 实测写入）。
-   注意：小窗口下侧边栏变成浮层抽屉、不占流，故左偏移归零。 */
-.extension-widget-slot {
-	position: fixed;
-	/* 用 --workspace-topbar-offset 而不是 --sidebar-width：后者在侧边栏折叠时
-	   仍是展开宽度（折叠只把 #sidebar-container 实际宽度设为 0），会让 widget
-	   左侧悬空一大块。前者由 applyWorkspaceTopbarOffset 按折叠态写 0。 */
-	left: calc(var(--workspace-topbar-offset, 320px) + 12px);
-	right: 16px;
-	z-index: 30;
-	pointer-events: none;
-}
-
-.extension-widget-slot > * {
-	pointer-events: auto;
-}
-
-.extension-widget-above {
-	bottom: calc(var(--composer-offset, 196px) + 8px);
-}
-
-.extension-widget-below {
-	bottom: 12px;
-}
-
-/* 非聊天 pane（设置/包管理等）没有 composer，fixed widget 必须收起 */
-.extension-widget-slot.pane-hidden {
-	display: none;
-}
-
-@media (max-width: 760px) {
-	.extension-widget-slot {
-		left: 12px;
-	}
-}
-
-/* 读屏专用文本：视觉上不可见但仍在无障碍树里。
-   用于 todo 单项的完成状态——✓/○ 是 aria-hidden 的装饰字符，
-   状态不能只靠它和颜色表达。 */
+/* 读屏专用文本：视觉不可见但留在无障碍树里。
+   ✓/○ 是 aria-hidden 的装饰字符，完成状态不能只靠它和颜色表达。 */
 .sr-only-text {
 	position: absolute;
 	width: 1px;
@@ -12123,4 +12123,26 @@ kbd {
 	clip-path: inset(50%);
 	white-space: nowrap;
 	border: 0;
+}
+
+/* 胶囊插槽：自身零高、position:relative 当锚点。
+   零高是关键——它是 .composer-inner 的 grid 子项，若占高就会把 composer 推高
+   并计入 --composer-offset，那就退回成「占布局」的老问题了。 */
+#todo-panel-slot {
+	position: relative;
+	height: 0;
+	min-height: 0;
+}
+
+/* 无清单时彻底不渲染。注意 .hidden-pane 只对特定 id 生效，对本插槽无效，
+   所以用专用类。 */
+#todo-panel-slot.todo-slot-empty {
+	display: none;
+}
+
+/* 有 todo 胶囊时，回到底部按钮横向让位，避免与居中胶囊重叠 */
+.chat-root.has-todo-chip .chat-jump-latest {
+	left: auto;
+	right: 16px;
+	transform: none;
 }

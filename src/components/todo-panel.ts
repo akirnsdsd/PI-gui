@@ -66,9 +66,6 @@ export function parseTodoDetails(details: unknown): TodoItem[] | null {
 	return items;
 }
 
-/** 面板默认折叠时展示的条数。 */
-const COLLAPSED_VISIBLE = 3;
-
 export class TodoPanel {
 	private container: HTMLElement;
 	private todos: TodoItem[] = [];
@@ -137,98 +134,83 @@ export class TodoPanel {
 
 	render(): void {
 		if (!this.hasContent()) {
-			this.container.classList.add("hidden-pane");
+			this.container.classList.add("todo-slot-empty");
 			render(nothing, this.container);
 			return;
 		}
-		this.container.classList.remove("hidden-pane");
+		this.container.classList.remove("todo-slot-empty");
 		render(this.renderPanel(), this.container);
 	}
 
+	/**
+	 * 胶囊 + hover 浮层。
+	 *
+	 * 形态对标 Codex 桌面版（已核实截图）：composer 上方居中一个窄胶囊，常驻显示
+	 * `第 N/M 步`；hover 胶囊浮出完整清单，浮层**绝对定位、不占布局**，所以不会
+	 * 挤压对话区——这也是窗口缩小时不再遮挡会话的根因修法。
+	 *
+	 * 关键取舍：整个 wrapper 用 :hover 触发浮层，而不是给胶囊绑 mouseenter/leave。
+	 * 浮层在 wrapper 内、紧贴胶囊上方，指针从胶囊移到浮层不会离开 wrapper，
+	 * 因此不会「刚展开就收回」。
+	 */
 	private renderPanel(): TemplateResult {
 		const done = this.todos.filter((item) => item.done).length;
 		const total = this.todos.length;
 		const allDone = done === total;
-		// 折叠时优先展示未完成项：用户关心的是「还剩什么」。
-		// 全部完成时退回按原序取前几条，否则面板会突然变空。
-		const pending = this.todos.filter((item) => !item.done);
-		const source = allDone ? this.todos : pending;
-		const visible = this.expanded ? this.todos : source.slice(0, COLLAPSED_VISIBLE);
-		const hiddenCount = this.expanded ? 0 : Math.max(0, total - visible.length);
-		const progressPercent = total === 0 ? 0 : Math.round((done / total) * 100);
+		// 进行中项：Codex 在胶囊上显示当前步序号，取第一条未完成的。
+		const currentIndex = this.todos.findIndex((item) => !item.done);
+		const stepNumber = currentIndex === -1 ? total : currentIndex + 1;
 
 		return html`
-			<div class="todo-panel ${allDone ? "is-complete" : ""}">
-				<div class="todo-panel-head">
-					<button
-						type="button"
-						class="todo-panel-toggle"
-						aria-expanded=${this.expanded ? "true" : "false"}
-						title=${this.expanded ? t("todoPanel.collapse") : t("todoPanel.expand")}
-						@click=${() => {
-							this.expanded = !this.expanded;
-							this.notifyViewState();
-							this.render();
-						}}
+			<div class="todo-chip-wrap ${this.expanded ? "is-pinned" : ""}">
+				<button
+					type="button"
+					class="todo-chip ${allDone ? "is-complete" : ""}"
+					aria-expanded=${this.expanded ? "true" : "false"}
+					title=${t("todoPanel.chipTitle")}
+					@click=${() => {
+						// 点击固定展开（hover 移开也不收），再点取消固定。
+						this.expanded = !this.expanded;
+						this.notifyViewState();
+						this.render();
+					}}
+				>
+					${allDone
+						? html`<span class="todo-chip-mark is-done" aria-hidden="true">✓</span>`
+						: html`<span class="todo-chip-spinner" aria-hidden="true"></span>`}
+					<span class="todo-chip-label"
+						>${allDone
+							? t("todoPanel.chipDone", { total: String(total) })
+							: t("todoPanel.chipStep", { step: String(stepNumber), total: String(total) })}</span
 					>
-						<span class="todo-panel-caret ${this.expanded ? "is-open" : ""}" aria-hidden="true">▸</span>
-						<span class="todo-panel-title">${t("todoPanel.title")}</span>
-						<span class="todo-panel-count">${done}/${total}</span>
-					</button>
-					<div
-						class="todo-panel-progress"
-						role="progressbar"
-						aria-label=${t("todoPanel.progressLabel")}
-						aria-valuemin="0"
-						aria-valuemax="100"
-						aria-valuenow=${progressPercent}
-					>
-						<div class="todo-panel-progress-fill" style="width:${progressPercent}%"></div>
+				</button>
+
+				<div class="todo-chip-popover" role="group" aria-label=${t("todoPanel.title")}>
+					<div class="todo-chip-popover-head">
+						<span class="todo-chip-popover-title">${t("todoPanel.title")}</span>
+						<span class="todo-chip-popover-count"
+							>${t("todoPanel.countLabel", { done: String(done), total: String(total) })}</span
+						>
 					</div>
-					<button
-						type="button"
-						class="todo-panel-dismiss"
-						title=${t("todoPanel.dismiss")}
-						aria-label=${t("todoPanel.dismiss")}
-						@click=${() => {
-							this.dismissed = true;
-							this.notifyViewState();
-							this.render();
-						}}
-					>
-						×
-					</button>
-				</div>
-
-				<ul class="todo-panel-list">
-					${visible.map(
-						(item) => html`
-							<li class="todo-panel-item ${item.done ? "is-done" : ""}">
-								<span class="todo-panel-mark" aria-hidden="true">${item.done ? "✓" : "○"}</span>
-								<span class="sr-only-text"
-									>${item.done ? t("todoPanel.itemDone") : t("todoPanel.itemPending")}</span
+					<ul class="todo-chip-list">
+						${this.todos.map(
+							(item, index) => html`
+								<li
+									class="todo-chip-item ${item.done ? "is-done" : ""} ${!item.done && index === currentIndex
+										? "is-current"
+										: ""}"
 								>
-								<span class="todo-panel-text">${item.text}</span>
-							</li>
-						`,
-					)}
-				</ul>
-
-				${hiddenCount > 0
-					? html`<button
-							type="button"
-							class="todo-panel-more"
-							@click=${() => {
-								this.expanded = true;
-								this.notifyViewState();
-								this.render();
-							}}
-					  >
-							${t("todoPanel.more", { count: String(hiddenCount) })}
-					  </button>`
-					: nothing}
+									<span class="todo-chip-item-mark" aria-hidden="true">${item.done ? "✓" : "○"}</span>
+									<span class="sr-only-text"
+										>${item.done ? t("todoPanel.itemDone") : t("todoPanel.itemPending")}</span
+									>
+									<span class="todo-chip-item-text">${item.text}</span>
+								</li>
+							`,
+						)}
+					</ul>
+				</div>
 			</div>
 		`;
 	}
 }
-
