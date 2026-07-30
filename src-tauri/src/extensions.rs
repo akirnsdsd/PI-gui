@@ -811,6 +811,9 @@ fn is_within_resource_roots(target: &Path, project_path: Option<&str>) -> bool {
         roots.push(agent.join("extensions"));
         // 侧栏「删除会话」把 session JSONL 移入废纸篓（可恢复），会话文件在 agent_dir()/sessions/ 下
         roots.push(agent.join("sessions"));
+        // 子智能体定义（agents/）与后台运行记录（subagent-bg-runs/）也走废纸篓删除
+        roots.push(agent.join("agents"));
+        roots.push(agent.join("subagent-bg-runs"));
     }
     if let Some(project_path) = project_path {
         roots.push(PathBuf::from(project_path).join(".pi").join("extensions"));
@@ -838,7 +841,7 @@ pub async fn move_path_to_trash(
     }
     if !is_within_resource_roots(&target, project_path.as_deref()) {
         return Err(
-            "只允许把 skills / 扩展 / 会话目录内的条目移入废纸篓，该路径不在受管目录内".to_string(),
+            "只允许把 skills / 扩展 / 会话 / 子智能体目录内的条目移入废纸篓，该路径不在受管目录内".to_string(),
         );
     }
     let trash = home_dir()?.join(".Trash");

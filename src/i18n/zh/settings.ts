@@ -34,6 +34,10 @@ export default {
 			label: "扩展",
 			description: "技能、散放扩展、MCP 服务器与项目信任。",
 		},
+		subagents: {
+			label: "子智能体",
+			description: "子智能体定义与后台运行记录。",
+		},
 	},
 	shell: {
 		appearanceDesc: "选择浅色、深色或跟随系统模式。",

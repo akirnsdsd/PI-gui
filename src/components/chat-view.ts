@@ -61,6 +61,7 @@ import {
 	handleComposerDropEvent,
 	handleComposerFilePickerChangeEvent,
 	handleComposerInputEvent,
+	COMPOSER_TEXTAREA_MAX_HEIGHT,
 	handleComposerKeyDownEvent,
 	handleComposerPasteEvent,
 } from "./chat-view/composer-input-events.js";
@@ -980,7 +981,7 @@ export class ChatView {
 		this.resetComposerHistoryNavigation();
 		this.updateSlashPaletteStateFromInput();
 		this.render();
-		this.syncComposerTextareaDeferred(text, { maxHeight: 200, focus: true });
+		this.syncComposerTextareaDeferred(text, { maxHeight: COMPOSER_TEXTAREA_MAX_HEIGHT, focus: true });
 	}
 
 	stageComposerCommand(commandText: string): void {
@@ -999,7 +1000,7 @@ export class ChatView {
 		this.resetComposerHistoryNavigation();
 		this.closeSlashPalette();
 		this.render();
-		this.syncComposerTextareaDeferred(commandText, { maxHeight: 200, focus: true });
+		this.syncComposerTextareaDeferred(commandText, { maxHeight: COMPOSER_TEXTAREA_MAX_HEIGHT, focus: true });
 	}
 
 	private normalizeSkillSlashCommandText(commandText: string): string {
@@ -1822,7 +1823,7 @@ export class ChatView {
 		if (this.inputText === commandText) return;
 		this.inputText = commandText;
 		this.syncComposerTextareaDeferred(commandText, {
-			maxHeight: 220,
+			maxHeight: COMPOSER_TEXTAREA_MAX_HEIGHT,
 			moveCaretToEnd: true,
 		});
 	}
@@ -4166,7 +4167,7 @@ export class ChatView {
 		this.updateSlashPaletteStateFromInput();
 		this.render();
 		this.syncComposerTextareaDeferred(text, {
-			maxHeight: 220,
+			maxHeight: COMPOSER_TEXTAREA_MAX_HEIGHT,
 			moveCaretToEnd: true,
 			focus: true,
 		});
@@ -4251,7 +4252,7 @@ export class ChatView {
 					this.pendingImages = this.cloneImages(images);
 					this.render();
 					this.syncComposerTextareaDeferred(text, {
-						maxHeight: 220,
+						maxHeight: COMPOSER_TEXTAREA_MAX_HEIGHT,
 						moveCaretToEnd: true,
 						focus: true,
 					});
@@ -4724,7 +4725,8 @@ export class ChatView {
 
 	private autosizeTimelineEditInput(textarea: HTMLTextAreaElement): void {
 		textarea.style.height = "auto";
-		textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+		// 与 .user-edit-input 的 max-height 一致（已是 220）。
+		textarea.style.height = `${Math.min(textarea.scrollHeight, COMPOSER_TEXTAREA_MAX_HEIGHT)}px`;
 	}
 
 	private handleTimelineEditInput(event: Event): void {
@@ -4821,7 +4823,7 @@ export class ChatView {
 				this.pendingImages = sourceAttachments;
 				this.render();
 				this.syncComposerTextareaDeferred(text, {
-					maxHeight: 220,
+					maxHeight: COMPOSER_TEXTAREA_MAX_HEIGHT,
 					moveCaretToEnd: true,
 					focus: true,
 				});
@@ -5799,6 +5801,7 @@ export class ChatView {
 			onUpdateSlashPaletteStateFromInput: () => this.updateSlashPaletteStateFromInput(),
 			onIsSlashPaletteOpen: () => this.slashPaletteOpen,
 			onRender: () => this.render(),
+			onComposerHeightChange: () => this.updateComposerOffset(),
 		});
 	}
 

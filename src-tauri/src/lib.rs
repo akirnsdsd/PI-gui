@@ -14,6 +14,7 @@ mod review;
 mod safe_config;
 mod session_lease;
 mod session_rewrite;
+mod subagents;
 
 #[derive(Default)]
 struct RpcProcessHandle {
@@ -4568,6 +4569,10 @@ pub fn run() {
             extensions::list_trusted_projects,
             extensions::list_mcp_servers,
             extensions::scan_mcp_import_sources,
+            subagents::list_subagents,
+            subagents::read_subagent,
+            subagents::save_subagent,
+            subagents::list_subagent_runs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

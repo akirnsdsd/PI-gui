@@ -1,5 +1,16 @@
 import type { SlashPaletteItem } from "../../commands/slash-command-runtime.js";
 
+/**
+ * 输入框自动增高的高度上限（px）。
+ *
+ * **必须与 `app.css` 里 `.chat-input` 的 `max-height` 保持一致。**
+ * 两边对不上时：JS 把 inline height 设到 220，而 CSS 只让它渲染到 160，
+ * 于是中间这段区间里 JS 以为变高了、实际布局没变，而 `.chat-scroll` 的
+ * `padding-bottom` 是按真实测量值算的——输入框会盖住最后一条消息。
+ * 改这个值时记得同步改 CSS。
+ */
+export const COMPOSER_TEXTAREA_MAX_HEIGHT = 220;
+
 type ComposerHistoryDirection = "up" | "down";
 type ComposerSendMode = "prompt" | "steer" | "followUp";
 
@@ -12,6 +23,8 @@ interface HandleComposerInputEventParams {
 	onUpdateSlashPaletteStateFromInput: () => void;
 	onIsSlashPaletteOpen: () => boolean;
 	onRender: () => void;
+	/** 输入框高度变化后重算 --composer-offset（不走整体 render）。 */
+	onComposerHeightChange: () => void;
 }
 
 interface HandleComposerPasteEventParams {
@@ -73,14 +86,25 @@ export function handleComposerInputEvent({
 	onUpdateSlashPaletteStateFromInput,
 	onIsSlashPaletteOpen,
 	onRender,
+	onComposerHeightChange,
 }: HandleComposerInputEventParams): void {
 	if (interactionLocked) return;
 	const textarea = event.target as HTMLTextAreaElement;
 	onSetInputText(textarea.value);
 	onResetComposerHistoryNavigation();
 	onUpdateSlashPaletteStateFromInput();
+	// 先存旧值：下面要把 height 置为 auto 才能量到真实 scrollHeight，
+	// 置 auto 之后再比就永远是「变了」。
+	const previousHeight = textarea.style.height;
 	textarea.style.height = "auto";
-	textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+	const nextHeight = `${Math.min(textarea.scrollHeight, COMPOSER_TEXTAREA_MAX_HEIGHT)}px`;
+	textarea.style.height = nextHeight;
+	// 高度真变了就得重算 --composer-offset，否则 .chat-scroll 的底部预留停在旧值，
+	// 输入框长高后会盖住最后一条消息。
+	// 不走整体 render()：那会在每次敲键时重建整棵时间线。
+	if (previousHeight !== nextHeight) {
+		onComposerHeightChange();
+	}
 	if (onIsSlashPaletteOpen() || slashPaletteOpenBefore) {
 		onRender();
 	}

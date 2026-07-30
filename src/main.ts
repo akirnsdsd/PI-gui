@@ -5358,6 +5358,8 @@ function normalizeSettingsSectionId(sectionId: string | null | undefined): Setti
 			return "channels";
 		case "extensions":
 			return "extensions";
+		case "subagents":
+			return "subagents";
 		case "updates":
 			return "updates";
 		default:
