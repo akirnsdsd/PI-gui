@@ -7,7 +7,6 @@ import { fetchDesktopUpdateStatus, openDesktopUpdate, type DesktopUpdateStatus }
 import { t } from "../i18n/index.js";
 import { ChannelsSettings } from "./settings-channels.js";
 import { ExtensionsSettings, type ExtensionsViewId } from "./settings-extensions.js";
-import { SubagentsSettings } from "./settings-subagents.js";
 import { closeAllSettingsSelects, SettingsSelectDropdown } from "./settings-select-dropdown.js";
 import {
 	applyDesktopAppearanceProfileToRoot,
@@ -56,7 +55,7 @@ interface SettingsState {
 	piBinaryPath: string;
 }
 
-export type SettingsSectionId = "general" | "appearance" | "channels" | "extensions" | "subagents" | "updates";
+export type SettingsSectionId = "general" | "appearance" | "channels" | "extensions" | "updates";
 
 export interface SettingsSectionNavItem {
 	id: SettingsSectionId;
@@ -121,7 +120,6 @@ export class SettingsPanel {
 	private activeSection: SettingsSectionId = "general";
 	private channelsSettings: ChannelsSettings;
 	private extensionsSettings: ExtensionsSettings;
-	private subagentsSettings: SubagentsSettings;
 	private readonly steeringModeSelect = new SettingsSelectDropdown({
 		requestRender: () => {
 			if (this.isOpen) this.render();
@@ -153,11 +151,6 @@ export class SettingsPanel {
 			},
 		});
 		this.extensionsSettings = new ExtensionsSettings({
-			requestRender: () => {
-				if (this.isOpen) this.render();
-			},
-		});
-		this.subagentsSettings = new SubagentsSettings({
 			requestRender: () => {
 				if (this.isOpen) this.render();
 			},
@@ -307,8 +300,6 @@ export class SettingsPanel {
 		this.createThemeDialogError = "";
 		closeAllSettingsSelects();
 		this.applyAppearanceProfileForCurrentResolvedTheme();
-		// 面板关闭后必须停掉子智能体 runs 的轮询，否则会在后台一直读磁盘。
-		this.subagentsSettings.stopRunsAutoRefresh();
 		this.isOpen = false;
 		this.render();
 		this.emitNavigationState();
@@ -322,7 +313,6 @@ export class SettingsPanel {
 		this.createThemeDialogError = "";
 		closeAllSettingsSelects();
 		this.applyAppearanceProfileForCurrentResolvedTheme();
-		this.subagentsSettings.stopRunsAutoRefresh();
 		this.isOpen = false;
 	}
 
@@ -1010,7 +1000,6 @@ export class SettingsPanel {
 			this.refreshThemeCatalog(),
 			this.channelsSettings.refresh(),
 			this.extensionsSettings.refresh(),
-			this.subagentsSettings.refresh(),
 			this.channelsSettings.refreshScopedModels(),
 		];
 		if (runtimeReady) {
@@ -1447,11 +1436,6 @@ export class SettingsPanel {
 				description: t("settings.nav.extensions.description"),
 			},
 			{
-				id: "subagents",
-				label: t("settings.nav.subagents.label"),
-				description: t("settings.nav.subagents.description"),
-			},
-			{
 				id: "updates",
 				label: t("settings.nav.updates.label"),
 				description: t("settings.nav.updates.description"),
@@ -1680,8 +1664,6 @@ export class SettingsPanel {
 				return this.channelsSettings.render();
 			case "extensions":
 				return this.extensionsSettings.render();
-			case "subagents":
-				return this.subagentsSettings.render();
 			case "updates":
 				return this.renderUpdatesSection(runtimeControlsEnabled, compatibilityChecks);
 			case "general":

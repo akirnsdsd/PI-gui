@@ -25,10 +25,9 @@ import channels from "./zh/channels.js";
 import extensions from "./zh/extensions.js";
 import models from "./zh/models.js";
 import lightbox from "./zh/lightbox.js";
-import subagents from "./zh/subagents.js";
 import todoPanel from "./zh/todoPanel.js";
 
-const messages = { common, commandPalette, composer, panels, timeline, chatMisc, sidebar, settings, app, chatView, packages, review, channels, extensions, models, lightbox, subagents, todoPanel } as const;
+const messages = { common, commandPalette, composer, panels, timeline, chatMisc, sidebar, settings, app, chatView, packages, review, channels, extensions, models, lightbox, todoPanel } as const;
 
 /** 递归展开嵌套对象为点路径 key，如 "commandPalette.hints.run"。 */
 type DotPaths<T> = {
