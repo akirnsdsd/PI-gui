@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { html } from "lit";
 import { mapBackendMessages } from "./backend-message-mapper.js";
+import { renderMessageTimelineRows } from "./message-timeline-view.js";
 import {
 	collectAssistantWorkflow,
 	resolveWorkflowDurationMs,
@@ -182,6 +184,82 @@ const runningTool: WorkflowToolCall = {
 			completedWithFinalText.workflow.endedAt === 4_000 &&
 			completedWithFinalText.nextIndex === 1,
 		completedWithFinalText,
+	);
+
+	// 回归：模型同一轮「先说话再调工具」产生 text+toolCalls 混合消息时，
+	// 这段正文必须留在 finalText 里（此前被 toolCalls 过滤整段吞掉）。
+	const mixedTextAndTools = collectAssistantWorkflow({
+		messages: [
+			{
+				id: "mixed-1",
+				role: "assistant",
+				text: "先说一下结论",
+				toolCalls: [{
+					id: "tool-1",
+					name: "bash",
+					args: { command: "ls" },
+					result: "ok",
+					isRunning: false,
+					isExpanded: false,
+					startedAt: 1_100,
+					endedAt: 2_000,
+				}],
+				startedAt: 1_000,
+				endedAt: 2_500,
+				isStreaming: false,
+			},
+			{
+				id: "mixed-final",
+				role: "assistant",
+				text: "最终回答",
+				toolCalls: [],
+				startedAt: 2_600,
+				endedAt: 3_000,
+				isStreaming: false,
+			},
+		],
+		startIndex: 0,
+		currentIsStreaming: false,
+		runHasAssistantText: true,
+		fallbackStartedAt: 0,
+		truncateText: (value) => value,
+	});
+	check(
+		"text on a tool-calling message is preserved in finalText",
+		mixedTextAndTools?.workflow.finalText === "先说一下结论\n\n最终回答" &&
+			mixedTextAndTools.workflow.toolCalls.length === 1 &&
+			mixedTextAndTools.nextIndex === 2,
+		mixedTextAndTools,
+	);
+}
+
+{
+	// keyed repeat 契约：同一批消息对象 prepend 历史后 key 不变、顺序正确，
+	// lit repeat() 据此移动 DOM 而不是全量重建（markdown 不重 parse）。
+	const timelineMessages = [
+		{ id: "u1", role: "user" as const, text: "问题一", toolCalls: [] },
+		{ id: "a1", role: "assistant" as const, text: "回答一", toolCalls: [] },
+		{ id: "u2", role: "user" as const, text: "问题二", toolCalls: [] },
+	];
+	const timelineParams = {
+		compactionCycle: null,
+		compactionInsertIndex: null,
+		collectAssistantWorkflow: () => null,
+		renderAssistantWorkflow: () => html``,
+		renderUserMessage: () => html``,
+		hasRenderableAssistantContent: () => true,
+		renderAssistantMessage: () => html``,
+		renderChangelogMessage: () => html``,
+		renderSystemMessage: () => html``,
+		renderCompactionCycle: () => html``,
+	};
+	const tailKeys = renderMessageTimelineRows({ messages: timelineMessages.slice(1), ...timelineParams }).map((row) => row.key);
+	const fullKeys = renderMessageTimelineRows({ messages: timelineMessages, ...timelineParams }).map((row) => row.key);
+	check(
+		"timeline row keys stay stable across history prepend",
+		tailKeys.join(",") === "assistant-a1,user-u2" &&
+			fullKeys.join(",") === "user-u1,assistant-a1,user-u2",
+		{ tailKeys, fullKeys },
 	);
 }
 

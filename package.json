@@ -21,6 +21,7 @@
 		"preview": "vite preview",
 		"check": "tsc --noEmit",
 		"test:ui": "esbuild src/components/chat-view/ui-behavior.selftest.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/ui-behavior-selftest.mjs && node node_modules/.cache/ui-behavior-selftest.mjs",
+		"test:marked": "esbuild src/marked-guard.selftest.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/marked-guard-selftest.mjs && node node_modules/.cache/marked-guard-selftest.mjs",
 		"test:channels": "esbuild src/channels/selftest.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/channels-selftest.mjs && node node_modules/.cache/channels-selftest.mjs"
 	},
 	"dependencies": {
@@ -36,6 +37,7 @@
 		"@xterm/xterm": "^6.0.0",
 		"lit": "^3.3.1",
 		"lucide": "^0.544.0",
+		"marked": "^16.4.2",
 		"pi-cursor-agent": "^0.4.2"
 	},
 	"devDependencies": {

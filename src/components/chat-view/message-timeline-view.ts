@@ -283,6 +283,11 @@ export function renderCompactionCycleRow({
 	`;
 }
 
+export interface TimelineRow {
+	key: string;
+	row: TemplateResult;
+}
+
 export function renderMessageTimelineRows<Message extends TimelineMessage>({
 	messages,
 	compactionCycle,
@@ -295,8 +300,10 @@ export function renderMessageTimelineRows<Message extends TimelineMessage>({
 	renderChangelogMessage,
 	renderSystemMessage,
 	renderCompactionCycle,
-}: RenderMessageTimelineRowsParams<Message>): TemplateResult[] {
-	const rows: TemplateResult[] = [];
+}: RenderMessageTimelineRowsParams<Message>): TimelineRow[] {
+	// 每行带稳定 key（消息对象 id 在挂载后不变），调用侧用 lit repeat() 做键控
+	// diff：向上翻页 prepend 历史时移动既有 DOM，而不是全量重建重 parse markdown。
+	const rows: TimelineRow[] = [];
 	const compactionInsertAt = compactionCycle
 		? Math.max(0, Math.min(compactionInsertIndex ?? messages.length, messages.length))
 		: null;
@@ -306,8 +313,8 @@ export function renderMessageTimelineRows<Message extends TimelineMessage>({
 		if (compactionInsertAt === null) return;
 		if (position !== compactionInsertAt) return;
 		const row = renderCompactionCycle();
-		if (row !== nothing) {
-			rows.push(row as TemplateResult);
+		if (row !== nothing && compactionCycle) {
+			rows.push({ key: `compaction-${compactionCycle.id}`, row: row as TemplateResult });
 		}
 		compactionInserted = true;
 	};
@@ -319,27 +326,27 @@ export function renderMessageTimelineRows<Message extends TimelineMessage>({
 		if (message.role === "assistant") {
 			const workflowCandidate = collectAssistantWorkflow(index);
 			if (workflowCandidate) {
-				rows.push(renderAssistantWorkflow(workflowCandidate.workflow));
+				rows.push({ key: workflowCandidate.workflow.id, row: renderAssistantWorkflow(workflowCandidate.workflow) });
 				index = workflowCandidate.nextIndex - 1;
 				continue;
 			}
 		}
 		if (message.role === "user") {
-			rows.push(renderUserMessage(message));
+			rows.push({ key: `user-${message.id}`, row: renderUserMessage(message) });
 			continue;
 		}
 		if (message.role === "assistant") {
 			if (!hasRenderableAssistantContent(message)) {
 				continue;
 			}
-			rows.push(renderAssistantMessage(message));
+			rows.push({ key: `assistant-${message.id}`, row: renderAssistantMessage(message) });
 			continue;
 		}
 		if (message.label === "changelog" || Boolean(message.collapsibleTitle)) {
-			rows.push(renderChangelogMessage(message));
+			rows.push({ key: `changelog-${message.id}`, row: renderChangelogMessage(message) });
 			continue;
 		}
-		rows.push(renderSystemMessage(message));
+		rows.push({ key: `system-${message.id}`, row: renderSystemMessage(message) });
 	}
 	maybeInsertCompaction(messages.length);
 	return rows;

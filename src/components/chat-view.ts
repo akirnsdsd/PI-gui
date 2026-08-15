@@ -5,6 +5,7 @@
 import "@mariozechner/mini-lit/dist/CodeBlock.js";
 import "@mariozechner/mini-lit/dist/MarkdownBlock.js";
 import { html, nothing, render, type TemplateResult } from "lit";
+import { repeat } from "lit/directives/repeat.js";
 import { t } from "../i18n/index.js";
 import { promptDialog } from "./app-dialog.js";
 import {
@@ -127,6 +128,7 @@ import {
 	renderMessageTimelineRows,
 	renderSystemMessageRow,
 	renderUserMessageEditRow,
+	type TimelineRow,
 } from "./chat-view/message-timeline-view.js";
 import {
 	executeBuiltinSlashCommand as executeBuiltinSlashCommandView,
@@ -5699,7 +5701,7 @@ export class ChatView {
 		});
 	}
 
-	private renderMessageTimeline(): TemplateResult[] {
+	private renderMessageTimeline(): TimelineRow[] {
 		return renderMessageTimelineRows({
 			messages: this.messages,
 			compactionCycle: this.compactionCycle,
@@ -6351,7 +6353,7 @@ export class ChatView {
 					${showWelcome
 						? this.renderCenteredWelcome()
 						: hasMessages
-							? html`${this.renderHistoryLoadEarlierRow()}${this.renderMessageTimeline()}`
+							? html`${this.renderHistoryLoadEarlierRow()}${repeat(this.renderMessageTimeline(), (row) => row.key, (row) => row.row)}`
 							: this.renderBindingState()}
 					${showWorkingIndicator ? this.renderWorkingIndicatorRow() : nothing}
 				</div>

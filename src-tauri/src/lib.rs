@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -1619,7 +1619,7 @@ async fn rpc_ui_response(
 }
 
 /// Session info for listing
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: String,
     pub name: Option<String>,
@@ -2091,6 +2091,68 @@ fn parse_session_info(path: &Path) -> Option<SessionInfo> {
     })
 }
 
+/// list_sessions 的解析缓存：按 (mtime, len) 命中。会话目录可有数百个
+/// JSONL、上百 MB，运行期间侧栏会频繁刷新；文件没变就复用上次的解析结果，
+/// 避免每次全量 read_to_string + 逐行 JSON parse。
+struct SessionInfoCacheEntry {
+    modified_at_ms: i64,
+    len: u64,
+    info: SessionInfo,
+}
+
+static SESSION_INFO_CACHE: OnceLock<Mutex<HashMap<PathBuf, SessionInfoCacheEntry>>> = OnceLock::new();
+
+fn session_info_cache() -> &'static Mutex<HashMap<PathBuf, SessionInfoCacheEntry>> {
+    SESSION_INFO_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn session_file_fingerprint(path: &Path) -> (i64, u64) {
+    match fs::metadata(path) {
+        Ok(meta) => {
+            let modified_at_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            (modified_at_ms, meta.len())
+        }
+        Err(_) => (0, 0),
+    }
+}
+
+fn collect_session_infos_cached(files: &[PathBuf]) -> Result<Vec<SessionInfo>, String> {
+    let mut cache = session_info_cache()
+        .lock()
+        .map_err(|e| format!("会话缓存锁失败：{}", e))?;
+    // 淘汰已删除会话的缓存项，避免无限增长。
+    let current_files: HashSet<&PathBuf> = files.iter().collect();
+    cache.retain(|path, _| current_files.contains(path));
+
+    let mut sessions = Vec::with_capacity(files.len());
+    for path in files {
+        let (modified_at_ms, len) = session_file_fingerprint(path);
+        if let Some(entry) = cache.get(path) {
+            if entry.modified_at_ms == modified_at_ms && entry.len == len {
+                sessions.push(entry.info.clone());
+                continue;
+            }
+        }
+        if let Some(info) = parse_session_info(path) {
+            cache.insert(
+                path.clone(),
+                SessionInfoCacheEntry {
+                    modified_at_ms,
+                    len,
+                    info: info.clone(),
+                },
+            );
+            sessions.push(info);
+        }
+    }
+    Ok(sessions)
+}
+
 /// List all sessions from pi's session directory (~/.pi/agent/sessions)
 #[tauri::command]
 async fn list_sessions(app: AppHandle) -> Result<Vec<SessionInfo>, String> {
@@ -2104,11 +2166,7 @@ async fn list_sessions(app: AppHandle) -> Result<Vec<SessionInfo>, String> {
     let mut files = Vec::new();
     collect_session_files_recursive(&sessions_dir, &mut files);
 
-    let mut sessions = files
-        .iter()
-        .filter_map(|path| parse_session_info(path))
-        .collect::<Vec<_>>();
-
+    let mut sessions = collect_session_infos_cached(&files)?;
     sessions.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
     Ok(sessions)
 }
@@ -6567,5 +6625,74 @@ mod tests {
             "123好",
             "上限正好落在字符边界时应保留完整字符"
         );
+    }
+
+    fn assistant_usage_line(id: &str, tokens: u64) -> String {
+        format!(
+            "{{\"type\":\"message\",\"id\":\"{}\",\"message\":{{\"role\":\"assistant\",\"usage\":{{\"totalTokens\":{},\"cost\":{{\"total\":0.01}}}}}}}}",
+            id, tokens
+        )
+    }
+
+    #[test]
+    fn session_info_cache_reuses_unchanged_and_reparses_appended() {
+        let root = temp_sessions_dir("info_cache");
+        let path_a = root.join("a.jsonl");
+        let path_b = root.join("b.jsonl");
+        write_lines(
+            &path_a,
+            &[
+                session_header("/Users/demo/a", "2026-07-25T10:00:00Z"),
+                assistant_usage_line("a1", 10),
+            ],
+        );
+        write_lines(
+            &path_b,
+            &[
+                session_header("/Users/demo/b", "2026-07-25T10:00:01Z"),
+                assistant_usage_line("b1", 20),
+            ],
+        );
+        let files = vec![path_a.clone(), path_b.clone()];
+
+        let first = collect_session_infos_cached(&files).unwrap();
+        let tokens_a = first
+            .iter()
+            .find(|s| s.path == path_a.to_string_lossy())
+            .map(|s| s.tokens)
+            .unwrap();
+        assert_eq!(tokens_a, 10);
+
+        // 追加内容后 (mtime, len) 指纹变化 → A 重新解析；未变的 B 继续命中缓存。
+        write_lines(
+            &path_a,
+            &[
+                session_header("/Users/demo/a", "2026-07-25T10:00:00Z"),
+                assistant_usage_line("a1", 10),
+                assistant_usage_line("a2", 5),
+            ],
+        );
+        let second = collect_session_infos_cached(&files).unwrap();
+        let tokens_a2 = second
+            .iter()
+            .find(|s| s.path == path_a.to_string_lossy())
+            .map(|s| s.tokens)
+            .unwrap();
+        let tokens_b2 = second
+            .iter()
+            .find(|s| s.path == path_b.to_string_lossy())
+            .map(|s| s.tokens)
+            .unwrap();
+        assert_eq!(tokens_a2, 15, "追加后必须重新解析");
+        assert_eq!(tokens_b2, 20);
+
+        // 文件被删后缓存项同步淘汰，不会永久残留。
+        let _ = fs::remove_file(&path_b);
+        let _ = collect_session_infos_cached(&[path_a.clone()]).unwrap();
+        let cache = session_info_cache().lock().unwrap();
+        assert!(!cache.contains_key(&path_b));
+        drop(cache);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

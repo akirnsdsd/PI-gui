@@ -234,10 +234,15 @@ export class ExtensionUiHandler {
 	private onNotificationActionTarget: ((target: NotificationActionTarget) => void) | null = null;
 	// 状态 chip 只在聊天布局（chat/file pane）可见；main.ts 在 pane 切换时同步。
 	private chatPaneActive = true;
-	// 最近一次通过抑制/清洗检查的状态文本，供 pane 切回时恢复渲染。
-	private lastStatus: { statusKey: string; text: string } | null = null;
-	// pi-mcp-adapter 状态文本解析出的连通性，驱动 chip 呼吸灯与弹层行状态。
-	private mcpConnection: McpConnectionState | null = null;
+	// 状态按来源 runtime 分桶：非活跃会话的 setStatus 只入桶不渲染，
+	// 切换会话 tab 时由 main.ts 调 setActiveRuntime 恢复对应桶——
+	// 避免 A 会话的「子任务运行中」chip 残留到 B 会话（陈旧串台）。
+	private statusByRuntime = new Map<string, { statusKey: string; text: string } | null>();
+	private activeStatusRuntimeId: string | null = null;
+	// widget 内容同样按来源 runtime 分桶（above/below 两个槽位）。
+	private widgetByRuntime = new Map<string, { above: string[]; below: string[] }>();
+	// pi-mcp-adapter 状态文本解析出的连通性（按 runtime 分桶），驱动 chip 呼吸灯与弹层行状态。
+	private mcpConnectionByRuntime = new Map<string, McpConnectionState | null>();
 	private mcpPanelContainer: HTMLElement | null = null;
 	private mcpPanelOpen = false;
 	private mcpServersLoading = false;
@@ -951,23 +956,57 @@ export class ExtensionUiHandler {
 		this.trace(`notify:dispatch backgrounded=${backgrounded ? "yes" : "no"} desktop=${desktopShown ? "yes" : "no"}`);
 	}
 
+	private currentStatus(): { statusKey: string; text: string } | null {
+		if (!this.activeStatusRuntimeId) return null;
+		return this.statusByRuntime.get(this.activeStatusRuntimeId) ?? null;
+	}
+
+	private currentMcpConnection(): McpConnectionState | null {
+		if (!this.activeStatusRuntimeId) return null;
+		return this.mcpConnectionByRuntime.get(this.activeStatusRuntimeId) ?? null;
+	}
+
+	/** main.ts 在活跃会话 runtime 切换时调用：恢复该 runtime 自己的状态 chip。 */
+	setActiveRuntime(runtimeId: string | null): void {
+		const next = runtimeId?.trim() || null;
+		if (this.activeStatusRuntimeId === next) return;
+		this.activeStatusRuntimeId = next;
+		if (this.mcpPanelOpen) this.closeMcpPanel();
+		this.renderStatus();
+		this.renderWidgetSlot("above");
+		this.renderWidgetSlot("below");
+	}
+
+	/** runtime 拆除时丢弃它的状态桶，避免长期运行积累已死会话的残留。 */
+	dropRuntime(runtimeId: string | null | undefined): void {
+		const key = runtimeId?.trim();
+		if (!key) return;
+		this.statusByRuntime.delete(key);
+		this.mcpConnectionByRuntime.delete(key);
+		this.widgetByRuntime.delete(key);
+	}
+
 	private setStatus(request: ExtensionUiRequest): void {
 		const statusKey = typeof request.statusKey === "string" ? request.statusKey.trim() : "";
+		const runtimeKey = request.runtimeId?.trim() || this.activeStatusRuntimeId || "";
+		let next: { statusKey: string; text: string } | null;
 		if (statusKey && shouldSuppressUiStatusKey(statusKey)) {
-			this.lastStatus = null;
+			next = null;
 		} else if (request.statusText === undefined) {
 			// Clear status
-			this.lastStatus = null;
+			next = null;
 		} else {
 			const text = sanitizeUiStatusText(request.statusText);
-			this.lastStatus = !text || shouldSuppressUiStatusText(text) ? null : { statusKey, text };
+			next = !text || shouldSuppressUiStatusText(text) ? null : { statusKey, text };
 		}
+		this.statusByRuntime.set(runtimeKey, next);
 		if (statusKey === "mcp") {
-			this.mcpConnection = this.lastStatus ? parseMcpConnectionState(statusKey, this.lastStatus.text) : null;
+			this.mcpConnectionByRuntime.set(runtimeKey, next ? parseMcpConnectionState(statusKey, next.text) : null);
 			// 弹层开着时跟随最新连通性刷新行状态。
-			if (this.mcpPanelOpen) this.renderMcpPanel();
+			if (this.mcpPanelOpen && runtimeKey === this.activeStatusRuntimeId) this.renderMcpPanel();
 		}
-		this.renderStatus();
+		// 非活跃 runtime 只更新桶，等切回时恢复；活跃 runtime 立即渲染。
+		if (runtimeKey === this.activeStatusRuntimeId) this.renderStatus();
 	}
 
 	private mountStatusContainer(): void {
@@ -987,7 +1026,7 @@ export class ExtensionUiHandler {
 	private renderStatus(): void {
 		if (!this.statusContainer) return;
 		this.mountStatusContainer();
-		const status = this.chatPaneActive ? this.lastStatus : null;
+		const status = this.chatPaneActive ? this.currentStatus() : null;
 		if (!status) {
 			this.statusContainer.classList.add("hidden");
 			this.statusContainer.innerHTML = "";
@@ -1000,7 +1039,7 @@ export class ExtensionUiHandler {
 		const detail = view?.detail ?? status.text;
 		const label = view?.label ?? (view?.icon ? "" : detail);
 		const isMcp = status.statusKey === "mcp";
-		const phase: McpConnectionPhase = this.mcpConnection?.phase ?? "disconnected";
+		const phase: McpConnectionPhase = this.currentMcpConnection()?.phase ?? "disconnected";
 		const inner = html`
 			${view?.icon ? html`<span class="ext-status-chip-icon">${view.icon}</span>` : nothing}
 			${isMcp ? html`<span class="ext-status-dot ext-status-dot-${phase}"></span>` : nothing}
@@ -1108,7 +1147,7 @@ export class ExtensionUiHandler {
 
 	private renderMcpPanel(): void {
 		if (!this.mcpPanelContainer) return;
-		const connection = this.mcpConnection;
+		const connection = this.currentMcpConnection();
 		const servers = this.mcpServers;
 
 		// 头部汇总：优先用适配器快照的 已连接/已启用，其次仅总数。
@@ -1163,7 +1202,8 @@ export class ExtensionUiHandler {
 
 	/** 拿不到服务器清单时的降级内容：适配器状态文本的中文明细（有就显示）。 */
 	private renderMcpAggregateFallback(): TemplateResult {
-		const status = this.lastStatus?.statusKey === "mcp" ? this.lastStatus : null;
+		const current = this.currentStatus();
+		const status = current?.statusKey === "mcp" ? current : null;
 		const detail = status ? (mapExtensionStatusText(status.statusKey, status.text)?.detail ?? status.text) : null;
 		if (!detail) return html`<div class="mcp-panel-note">${t("panels.extensionUi.mcpPanel.noStatus")}</div>`;
 		return html`<div class="mcp-panel-note">${detail}</div>`;
@@ -1199,10 +1239,8 @@ export class ExtensionUiHandler {
 		// todo 清单已由 GUI 原生面板渲染（src/components/todo-panel.ts，读结构化 details）。
 		// 扩展同时会推一份纯文本给 TUI，在 GUI 里必须忽略，否则会和面板重复展示。
 		if (request.widgetKey === "todo-list") return;
-		const container =
-			request.widgetPlacement === "belowEditor" ? this.widgetBelowContainer : this.widgetAboveContainer;
-		if (!container) return;
-
+		const placement = request.widgetPlacement === "belowEditor" ? ("below" as const) : ("above" as const);
+		const runtimeKey = request.runtimeId?.trim() || this.activeStatusRuntimeId || "";
 		const lines = (request.widgetLines ?? [])
 			// widgetLines 来自用户自装的扩展，不可信：
 			// - 非字符串会在 sanitizeUiStatusText 的 .replace() 处抛错；
@@ -1211,6 +1249,18 @@ export class ExtensionUiHandler {
 			.slice(0, 24)
 			.map((line) => sanitizeUiStatusText(line.length > 400 ? `${line.slice(0, 400)}…` : line))
 			.filter((line) => Boolean(line) && !shouldSuppressUiStatusText(line));
+		const bucket = this.widgetByRuntime.get(runtimeKey) ?? { above: [], below: [] };
+		bucket[placement] = lines;
+		this.widgetByRuntime.set(runtimeKey, bucket);
+		// 非活跃 runtime 只更新桶；活跃 runtime 立即渲染。
+		if (runtimeKey === this.activeStatusRuntimeId) this.renderWidgetSlot(placement);
+	}
+
+	private renderWidgetSlot(placement: "above" | "below"): void {
+		const container = placement === "below" ? this.widgetBelowContainer : this.widgetAboveContainer;
+		if (!container) return;
+		const bucket = this.activeStatusRuntimeId ? this.widgetByRuntime.get(this.activeStatusRuntimeId) : null;
+		const lines = bucket?.[placement] ?? [];
 		if (lines.length === 0) {
 			container.classList.add("hidden");
 			container.innerHTML = "";

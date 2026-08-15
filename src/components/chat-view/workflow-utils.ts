@@ -253,8 +253,9 @@ export function collectAssistantWorkflow({
 		.filter(Boolean);
 	const dedupedThinkingParts = thinkingParts.filter((part, index) => index === 0 || part !== thinkingParts[index - 1]);
 	const thinkingText = dedupedThinkingParts.join("\n\n").trim();
+	// 带 toolCalls 的消息上的 text 也要保留：模型（如 Claude）常在同一轮
+	// 先输出正文再调工具，过滤掉会让这段正文在收起/展开两种状态下都彻底消失。
 	const finalText = grouped
-		.filter((entry) => entry.toolCalls.length === 0)
 		.map((entry) => entry.text.trim())
 		.filter(Boolean)
 		.join("\n\n");

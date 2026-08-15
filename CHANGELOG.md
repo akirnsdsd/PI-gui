@@ -13,6 +13,11 @@ The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0
 ### Fixed
 - Improved Linux/macOS fallback discovery for global npm installs by checking additional common user-prefix locations (including `~/.npm-global/bin/pi`) and npm prefix environment hints.
 - Explicit Pi path resolution now supports `~`-prefixed paths in manual settings/env override flows.
+- Assistant text attached to a tool-calling message no longer disappears from the timeline: workflow grouping now keeps that text in the collapsed/expanded trace instead of dropping it entirely (regression selftest added).
+- Markdown rendering no longer degrades over the app's lifetime: mini-lit's `MarkdownBlock` re-registers the same KaTeX extensions on every `render()`, and marked never dedupes, so parse cost grew linearly with render count (most visible as one very markdown-heavy thread opening extremely slowly). A bootstrap guard now dedupes extension registrations by name (selftest added).
+- Extension status chip is now bucketed per session runtime: a background/neighbor session's `setStatus` no longer leaves a stale chip (e.g. "N subagents running") on the session you switched to; switching tabs restores that session's own chip state. The same per-runtime bucketing now also covers `setWidget` slots, and runtime teardown drops its buckets.
+- Message timeline rows now render through lit's keyed `repeat()`: paging older history into a long session moves existing DOM nodes instead of rebuilding every row and re-parsing all markdown.
+- Sidebar `list_sessions` no longer re-reads and re-parses every session JSONL on each refresh (during runs this fired roughly every 1.2s across the whole sessions directory): parse results are cached per file and only re-parsed when the file's (mtime, size) fingerprint changes (regression test added).
 
 ## [1.0.0] - 2026-04-13
 

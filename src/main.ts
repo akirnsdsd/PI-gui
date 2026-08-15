@@ -2,6 +2,7 @@
  * Pi Desktop - app bootstrap
  */
 
+import "./marked-guard.js";
 import { html, nothing, render } from "lit";
 import { alertDialog, confirmDialog, promptDialog } from "./components/app-dialog.js";
 import { ChatView, type SessionForkedInfo } from "./components/chat-view.js";
@@ -683,6 +684,8 @@ function getOrCreateRuntimeForTab(workspaceId: string, tabId: string, projectPat
 function setActiveRuntime(runtime: SessionRuntime | null): void {
 	activeSessionRuntimeKey = runtime?.key ?? null;
 	setActiveRpcBridge(runtime?.bridge ?? null);
+	// 状态 chip 按 runtime 分桶：切会话时恢复目标 runtime 自己的 chip，杜绝陈旧串台。
+	extensionUiHandler?.setActiveRuntime(runtime?.bridge.getInstanceId() ?? rpcBridge.getInstanceId());
 	syncDebugOverlay();
 }
 
@@ -1025,6 +1028,20 @@ function handleBackgroundRuntimeNotifyEvent(runtimeKey: string, event: Record<st
 	}
 	if (type !== "extension_ui_request") return;
 	const method = typeof event.method === "string" ? event.method : "unknown";
+	if (method === "setStatus" || method === "set_status" || method === "setWidget" || method === "set_widget") {
+		// 状态 chip / widget 按 runtime 分桶（ExtensionUiHandler）：后台 runtime 的
+		// setStatus/setWidget（含任务结束后的清除调用）只更新自己的桶、不渲染。
+		// 若像交互请求一样 cancel，A 会话结束后清的「子任务运行中」会留在
+		// 桶里，切回 A 时复活。这类请求是 fire-and-forget，无需回复。
+		const statusRequest = { ...(event as Record<string, unknown>) };
+		statusRequest.runtimeId = runtime.instanceId;
+		const normalizedStatusRequest = normalizeExtensionUiRequest(statusRequest);
+		if (normalizedStatusRequest) {
+			recordDebugTrace(`extension_ui_request background-status method=${method} runtime=${runtime.instanceId}`);
+			void extensionUiHandler?.handleRequest(normalizedStatusRequest);
+		}
+		return;
+	}
 	if (method !== "notify") {
 		// RUNTIME-02：后台 runtime 的交互请求（confirm/input/select 等）无法前台展示，
 		// 立即向来源 bridge 回复 cancelled，避免扩展侧永久等待。
@@ -1345,6 +1362,7 @@ function removeRuntimeByKey(runtimeKey: string): Promise<void> | null {
 	runtime.runEpoch += 1;
 	applySessionRuntimeLifecycleSignal(runtime, { type: "terminal_failure" });
 	sessionRuntimes.delete(runtimeKey);
+	extensionUiHandler?.dropRuntime(runtime.instanceId);
 	clearRuntimeRunState(runtimeKey);
 	if (activeSessionRuntimeKey === runtimeKey) {
 		setActiveRuntime(null);
@@ -5008,6 +5026,8 @@ function initializeComponents(): void {
 
 	extensionUiHandler = new ExtensionUiHandler();
 	extensionUiHandler.setTraceHandler(recordDebugTrace);
+	// 初始化状态桶的活跃 runtime（handler 创建前可能已有会话激活）。
+	extensionUiHandler.setActiveRuntime(getActiveRuntime()?.bridge.getInstanceId() ?? rpcBridge.getInstanceId());
 	// MCP chip：点击弹层的数据源（list_mcp_servers）与「管理 MCP…」入口（设置→扩展→MCP tab）。
 	extensionUiHandler.setMcpServersProvider(async (): Promise<McpChipServerInfo[]> => {
 		const workspace = getActiveWorkspace();
